@@ -17,9 +17,9 @@ using Yarp.ReverseProxy.Service.Management;
 
 namespace Yarp.ReverseProxy.Middleware.Tests
 {
-    public class DestinationInitializerMiddlewareTests : TestAutoMockBase
+    public class ProxyPipelineInitializerMiddlewareTests : TestAutoMockBase
     {
-        public DestinationInitializerMiddlewareTests()
+        public ProxyPipelineInitializerMiddlewareTests()
         {
             Provide<RequestDelegate>(context =>
             {
@@ -31,7 +31,7 @@ namespace Yarp.ReverseProxy.Middleware.Tests
         [Fact]
         public void Constructor_Works()
         {
-            Create<DestinationInitializerMiddleware>();
+            Create<ProxyPipelineInitializerMiddleware>();
         }
 
         [Fact]
@@ -60,7 +60,7 @@ namespace Yarp.ReverseProxy.Middleware.Tests
             var httpContext = new DefaultHttpContext();
             httpContext.SetEndpoint(aspNetCoreEndpoint);
 
-            var sut = Create<DestinationInitializerMiddleware>();
+            var sut = Create<ProxyPipelineInitializerMiddleware>();
 
             await sut.Invoke(httpContext);
 
@@ -115,7 +115,7 @@ namespace Yarp.ReverseProxy.Middleware.Tests
             var httpContext = new DefaultHttpContext();
             httpContext.SetEndpoint(aspNetCoreEndpoint);
 
-            var sut = Create<DestinationInitializerMiddleware>();
+            var sut = Create<ProxyPipelineInitializerMiddleware>();
 
             await sut.Invoke(httpContext);
 
