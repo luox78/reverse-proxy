@@ -48,8 +48,8 @@ namespace Yarp.Sample
                     // Use a custom proxy middleware, defined below
                     proxyPipeline.Use(MyCustomProxyStep);
                     // Don't forget to include these two middleware when you make a custom proxy pipeline (if you need them).
-                    proxyPipeline.UseAffinitizedDestinationLookup();
-                    proxyPipeline.UseProxyLoadBalancing();
+                    proxyPipeline.UseSessionAffinity();
+                    proxyPipeline.UseLoadBalancing();
                 });
             });
         }
@@ -62,7 +62,7 @@ namespace Yarp.Sample
                 {
                     RouteId = "route1",
                     ClusterId = "cluster1",
-                    Match = new ProxyMatch
+                    Match = new RouteMatch
                     {
                         // Path or Hosts are required for each route. This catch-all pattern matches all request paths.
                         Path = "{**catch-all}"

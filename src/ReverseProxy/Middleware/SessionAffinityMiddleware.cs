@@ -17,18 +17,18 @@ namespace Yarp.ReverseProxy.Middleware
     /// <summary>
     /// Looks up an affinitized <see cref="DestinationInfo"/> matching the request's affinity key if any is set
     /// </summary>
-    internal class AffinitizedDestinationLookupMiddleware
+    internal sealed class SessionAffinityMiddleware
     {
         private readonly RequestDelegate _next;
         private readonly IDictionary<string, ISessionAffinityProvider> _sessionAffinityProviders;
         private readonly IDictionary<string, IAffinityFailurePolicy> _affinityFailurePolicies;
         private readonly ILogger _logger;
 
-        public AffinitizedDestinationLookupMiddleware(
+        public SessionAffinityMiddleware(
             RequestDelegate next,
             IEnumerable<ISessionAffinityProvider> sessionAffinityProviders,
             IEnumerable<IAffinityFailurePolicy> affinityFailurePolicies,
-            ILogger<AffinitizedDestinationLookupMiddleware> logger)
+            ILogger<SessionAffinityMiddleware> logger)
         {
             _next = next ?? throw new ArgumentNullException(nameof(next));
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -38,7 +38,7 @@ namespace Yarp.ReverseProxy.Middleware
 
         public Task Invoke(HttpContext context)
         {
-            var proxyFeature = context.GetRequiredProxyFeature();
+            var proxyFeature = context.GetReverseProxyFeature();
 
             var cluster = proxyFeature.ClusterSnapshot.Options;
             var options = cluster.SessionAffinity;

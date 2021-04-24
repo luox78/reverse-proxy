@@ -31,7 +31,7 @@ namespace Yarp.ReverseProxy.Sample
                 {
                     RouteId = "route1",
                     ClusterId = "cluster1",
-                    Match = new ProxyMatch
+                    Match = new RouteMatch
                     {
                         Path = "{**catch-all}"
                     }
@@ -52,7 +52,7 @@ namespace Yarp.ReverseProxy.Sample
 
             services.AddReverseProxy()
                 .LoadFromMemory(routes, clusters)
-                .ConfigureClient((context, handler) =>
+                .ConfigureHttpClient((context, handler) =>
                 {
                     handler.Expect100ContinueTimeout = TimeSpan.FromMilliseconds(300);
                 })
@@ -94,7 +94,7 @@ namespace Yarp.ReverseProxy.Sample
             services.AddHttpContextAccessor();
             services.AddSingleton<IProxyMetricsConsumer, ProxyMetricsConsumer>();
             services.AddScoped<IProxyTelemetryConsumer, ProxyTelemetryConsumer>();
-            services.AddProxyTelemetryListener();
+            services.AddTelemetryListeners();
         }
 
         /// <summary>
@@ -123,8 +123,8 @@ namespace Yarp.ReverseProxy.Sample
 
                         return next();
                     });
-                    proxyPipeline.UseAffinitizedDestinationLookup();
-                    proxyPipeline.UseProxyLoadBalancing();
+                    proxyPipeline.UseSessionAffinity();
+                    proxyPipeline.UseLoadBalancing();
                 });
             });
         }

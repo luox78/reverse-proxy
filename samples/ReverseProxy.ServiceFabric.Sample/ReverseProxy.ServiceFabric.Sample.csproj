@@ -5,10 +5,11 @@
     <OutputType>Exe</OutputType>
     <RootNamespace>Yarp.Sample</RootNamespace>
     <PlatformTarget>x64</PlatformTarget>
+    <LangVersion>latest</LangVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Yarp.ReverseProxy.ServiceFabric" Version="1.0.0-preview.11.*" />
+    <PackageReference Include="Yarp.ReverseProxy.ServiceFabric" Version="1.0.0-preview.11.21223.5" />
   </ItemGroup>
 
   <ItemGroup>

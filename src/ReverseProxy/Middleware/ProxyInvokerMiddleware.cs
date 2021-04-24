@@ -15,7 +15,7 @@ namespace Yarp.ReverseProxy.Middleware
     /// <summary>
     /// Invokes the proxy at the end of the request processing pipeline.
     /// </summary>
-    internal class ProxyInvokerMiddleware
+    internal sealed class ProxyInvokerMiddleware
     {
         private readonly IRandomFactory _randomFactory;
         private readonly RequestDelegate _next; // Unused, this middleware is always terminal
@@ -39,11 +39,11 @@ namespace Yarp.ReverseProxy.Middleware
         {
             _ = context ?? throw new ArgumentNullException(nameof(context));
 
-            var reverseProxyFeature = context.GetRequiredProxyFeature();
+            var reverseProxyFeature = context.GetReverseProxyFeature();
             var destinations = reverseProxyFeature.AvailableDestinations
                 ?? throw new InvalidOperationException($"The {nameof(IReverseProxyFeature)} Destinations collection was not set.");
 
-            var routeConfig = context.GetRequiredRouteConfig();
+            var routeConfig = context.GetRouteConfig();
             var cluster = routeConfig.Cluster;
 
             if (destinations.Count == 0)

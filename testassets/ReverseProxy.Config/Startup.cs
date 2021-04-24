@@ -32,7 +32,7 @@ namespace Yarp.ReverseProxy.Sample
             services.AddControllers();
             services.AddReverseProxy()
                 .LoadFromConfig(_configuration.GetSection("ReverseProxy"))
-                .AddProxyConfigFilter<CustomConfigFilter>();
+                .AddConfigFilter<CustomConfigFilter>();
         }
 
         /// <summary>
@@ -61,8 +61,8 @@ namespace Yarp.ReverseProxy.Sample
 
                         return next();
                     });
-                    proxyPipeline.UseAffinitizedDestinationLookup();
-                    proxyPipeline.UseProxyLoadBalancing();
+                    proxyPipeline.UseSessionAffinity();
+                    proxyPipeline.UseLoadBalancing();
                     proxyPipeline.UsePassiveHealthChecks();
                 })
                 .ConfigureEndpoints((builder, route) => builder.WithDisplayName($"ReverseProxy {route.RouteId}-{route.ClusterId}"));
