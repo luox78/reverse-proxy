@@ -1,221 +1,185 @@
 ﻿// Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Shouldly;
 using System.Threading.Tasks;
+using Xunit;
 
-namespace Microsoft.Kubernetes.ResourceKinds.OpenApi
+namespace Microsoft.Kubernetes.ResourceKinds.OpenApi;
+
+public class OpenApiResourceKindProviderTests
 {
-    [TestClass]
-    public class OpenApiResourceKindProviderTests
+    public static OpenApiResourceKindProvider SharedProvider { get; set; } = new(new FakeLogger<OpenApiResourceKindProvider>());
+
+    [Theory]
+    [InlineData("v1", "Pod")]
+    [InlineData("rbac.authorization.k8s.io/v1", "RoleBinding")]
+    public async Task BuiltInResourceKindsCanBeFound(string apiVersion, string kind)
     {
-        public static OpenApiResourceKindProvider SharedProvider { get; set; }
+        var provider = SharedProvider;
 
-        [ClassInitialize]
-        public static void ClassInitialize(TestContext testContext)
-        {
-            if (testContext is null)
-            {
-                throw new System.ArgumentNullException(nameof(testContext));
-            }
+        var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
 
-            SharedProvider = new OpenApiResourceKindProvider(new FakeLogger<OpenApiResourceKindProvider>());
-        }
+        Assert.NotNull(resourceKind);
+        Assert.Equal(apiVersion, resourceKind.ApiVersion);
+        Assert.Equal(kind, resourceKind.Kind);
+        Assert.NotNull(resourceKind.Schema);
+        Assert.Equal(ElementMergeStrategy.MergeObject, resourceKind.Schema.MergeStrategy);
+    }
 
-        [TestMethod]
-        [DataRow("v1", "Pod")]
-        [DataRow("rbac.authorization.k8s.io/v1", "RoleBinding")]
-        public async Task BuiltInResourceKindsCanBeFound(string apiVersion, string kind)
-        {
-            // arrange
-            var provider = SharedProvider;
+    [Theory]
+    [InlineData("v1", "Pod")]
+    [InlineData("rbac.authorization.k8s.io/v1", "RoleBinding")]
+    public async Task UnknownPropertiesComeBackAsMergeStrategyUnknown(string apiVersion, string kind)
+    {
+        var provider = SharedProvider;
 
-            // act
-            var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
+        var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
 
-            // assert
-            resourceKind.ShouldNotBeNull();
-            resourceKind.ApiVersion.ShouldBe(apiVersion);
-            resourceKind.Kind.ShouldBe(kind);
-            resourceKind.Schema.ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.MergeObject);
-        }
+        Assert.NotNull(resourceKind.Schema);
+        var property = resourceKind.Schema.GetPropertyElementType("badPropertyName");
+        Assert.NotNull(property);
+        Assert.Equal(ElementMergeStrategy.Unknown, property.MergeStrategy);
+    }
 
+    [Theory]
+    [InlineData("v1", "Pod")]
+    [InlineData("rbac.authorization.k8s.io/v1", "RoleBinding")]
+    public async Task ApiVersionAndKindArePrimative(string apiVersion, string kind)
+    {
+        var provider = SharedProvider;
 
+        var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
 
-        [TestMethod]
-        [DataRow("v1", "Pod")]
-        [DataRow("rbac.authorization.k8s.io/v1", "RoleBinding")]
-        public async Task UnknownPropertiesComeBackAsMergeStrategyUnknown(string apiVersion, string kind)
-        {
-            // arrange
-            var provider = SharedProvider;
+        Assert.NotNull(resourceKind.Schema);
 
-            // act
-            var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
+        var apiVersionProperty = resourceKind.Schema.GetPropertyElementType("apiVersion");
+        Assert.NotNull(apiVersionProperty);
+        Assert.Equal(ElementMergeStrategy.ReplacePrimative, apiVersionProperty.MergeStrategy);
 
-            // assert
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("badPropertyName").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.Unknown);
-        }
+        var kindProperty = resourceKind.Schema.GetPropertyElementType("kind");
+        Assert.NotNull(kindProperty);
+        Assert.Equal(ElementMergeStrategy.ReplacePrimative, kindProperty.MergeStrategy);
+    }
 
-        [TestMethod]
-        [DataRow("v1", "Pod")]
-        [DataRow("rbac.authorization.k8s.io/v1", "RoleBinding")]
-        public async Task ApiVersionAndKindArePrimative(string apiVersion, string kind)
-        {
-            // arrange
-            var provider = SharedProvider;
+    [Theory]
+    [InlineData("v1", "Pod")]
+    [InlineData("rbac.authorization.k8s.io/v1", "RoleBinding")]
+    public async Task MetadataNameAndNamespaceArePrimative(string apiVersion, string kind)
+    {
+        var provider = SharedProvider;
 
-            // act
-            var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
+        var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
 
-            // assert
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("apiVersion").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.ReplacePrimative);
+        Assert.NotNull(resourceKind);
+        Assert.NotNull(resourceKind.Schema);
+        var metadata = resourceKind.Schema.GetPropertyElementType("metadata");
+        Assert.NotNull(metadata);
+        Assert.Equal(ElementMergeStrategy.MergeObject, metadata.MergeStrategy);
 
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("kind").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.ReplacePrimative);
-        }
+        var name = metadata.GetPropertyElementType("name");
+        Assert.NotNull(name);
+        Assert.Equal(ElementMergeStrategy.ReplacePrimative, name.MergeStrategy);
 
-        [TestMethod]
-        [DataRow("v1", "Pod")]
-        [DataRow("rbac.authorization.k8s.io/v1", "RoleBinding")]
-        public async Task MetadataNameAndNamespaceArePrimative(string apiVersion, string kind)
-        {
-            // arrange
-            var provider = SharedProvider;
+        var @namespace = metadata.GetPropertyElementType("namespace");
+        Assert.NotNull(@namespace);
+        Assert.Equal(ElementMergeStrategy.ReplacePrimative, @namespace.MergeStrategy);
+    }
 
-            // act
-            var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
+    [Fact]
+    public async Task ResourceKindAreCachedByAtProviderLevel()
+    {
+        var provider1 = new OpenApiResourceKindProvider(new FakeLogger<OpenApiResourceKindProvider>());
+        var provider2 = new OpenApiResourceKindProvider(new FakeLogger<OpenApiResourceKindProvider>());
 
-            // assert
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("metadata").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.MergeObject);
+        var pod1a = await provider1.GetResourceKindAsync("v1", "Pod");
+        var pod1b = await provider1.GetResourceKindAsync("v1", "Pod");
+        var pod2a = await provider2.GetResourceKindAsync("v1", "Pod");
+        var pod2b = await provider2.GetResourceKindAsync("v1", "Pod");
 
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("metadata").ShouldNotBeNull()
-                .GetPropertyElementType("name").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.ReplacePrimative);
+        Assert.Same(pod1b, pod1a);
+        Assert.Same(pod2b, pod2a);
+        Assert.NotSame(pod2a, pod1a);
+        Assert.NotSame(pod2b, pod1a);
+        Assert.NotSame(pod2a, pod1b);
+        Assert.NotSame(pod2b, pod1b);
+    }
 
-            resourceKind.Schema.ShouldNotBeNull()
-                .GetPropertyElementType("metadata").ShouldNotBeNull()
-                .GetPropertyElementType("namespace").ShouldNotBeNull()
-                .MergeStrategy.ShouldBe(ElementMergeStrategy.ReplacePrimative);
-        }
+    [Fact]
+    public async Task MergeKeyAttributesAreRecognized()
+    {
+        var provider = SharedProvider;
 
-        [TestMethod]
-        public async Task ResourceKindAreCachedByAtProviderLevel()
-        {
-            // arrange
-            var provider1 = new OpenApiResourceKindProvider(new FakeLogger<OpenApiResourceKindProvider>());
-            var provider2 = new OpenApiResourceKindProvider(new FakeLogger<OpenApiResourceKindProvider>());
+        var pod = await provider.GetResourceKindAsync("v1", "Pod");
 
-            // act
-            var pod1a = await provider1.GetResourceKindAsync("v1", "Pod");
-            var pod1b = await provider1.GetResourceKindAsync("v1", "Pod");
-            var pod2a = await provider2.GetResourceKindAsync("v1", "Pod");
-            var pod2b = await provider2.GetResourceKindAsync("v1", "Pod");
+        Assert.NotNull(pod);
+        Assert.NotNull(pod.Schema);
+        var spec = pod.Schema.GetPropertyElementType("spec");
+        Assert.NotNull(spec);
+        var containers = spec.GetPropertyElementType("containers");
+        Assert.NotNull(containers);
 
-            // assert
-            pod1a.ShouldBeSameAs(pod1b);
-            pod2a.ShouldBeSameAs(pod2b);
-            pod1a.ShouldNotBeSameAs(pod2a);
-            pod1a.ShouldNotBeSameAs(pod2b);
-            pod1b.ShouldNotBeSameAs(pod2a);
-            pod1b.ShouldNotBeSameAs(pod2b);
-        }
+        Assert.Equal(ElementMergeStrategy.MergeListOfObject, containers.MergeStrategy);
+        Assert.Equal("name", containers.MergeKey);
+    }
 
-        [TestMethod]
-        public async Task MergeKeyAttributesAreRecognized()
-        {
-            // arrange
-            var provider = SharedProvider;
+    [Fact]
+    public async Task ArrayOfPrimativeWithoutExtensionsIsReplaceListOfPrimative()
+    {
+        var provider = SharedProvider;
 
-            // act
-            var pod = await provider.GetResourceKindAsync("v1", "Pod");
+        var pod = await provider.GetResourceKindAsync("v1", "Pod");
 
-            // assert
-            var containers = pod.ShouldNotBeNull()
-                .Schema.ShouldNotBeNull()
-                .GetPropertyElementType("spec").ShouldNotBeNull()
-                .GetPropertyElementType("containers").ShouldNotBeNull();
+        Assert.NotNull(pod);
+        Assert.NotNull(pod.Schema);
+        var spec = pod.Schema.GetPropertyElementType("spec");
+        Assert.NotNull(spec);
+        var containers = spec.GetPropertyElementType("containers");
+        Assert.NotNull(containers);
+        var containersCollection = containers.GetCollectionElementType();
+        Assert.NotNull(containersCollection);
+        var args = containersCollection.GetPropertyElementType("args");
 
-            containers.MergeStrategy.ShouldBe(ElementMergeStrategy.MergeListOfObject);
-            containers.MergeKey.ShouldBe("name");
-        }
+        Assert.Equal(ElementMergeStrategy.ReplaceListOfPrimative, args.MergeStrategy);
+    }
 
-        [TestMethod]
-        public async Task ArrayOfPrimativeWithoutExtensionsIsReplaceListOfPrimative()
-        {
-            // arrange
-            var provider = SharedProvider;
+    [Fact]
+    public async Task ArrayOfPrimativeCanHaveMergeExtensions()
+    {
+        var provider = SharedProvider;
 
-            // act
-            var pod = await provider.GetResourceKindAsync("v1", "Pod");
+        var pod = await provider.GetResourceKindAsync("v1", "Pod");
 
-            // assert
-            var args = pod.ShouldNotBeNull()
-                .Schema.ShouldNotBeNull()
-                .GetPropertyElementType("spec").ShouldNotBeNull()
-                .GetPropertyElementType("containers").ShouldNotBeNull()
-                .GetCollectionElementType().ShouldNotBeNull()
-                .GetPropertyElementType("args");
+        Assert.NotNull(pod);
+        Assert.NotNull(pod.Schema);
+        var metadata = pod.Schema.GetPropertyElementType("metadata");
+        Assert.NotNull(metadata);
+        var finalizers = metadata.GetPropertyElementType("finalizers");
+        Assert.NotNull(finalizers);
 
-            args.MergeStrategy.ShouldBe(ElementMergeStrategy.ReplaceListOfPrimative);
-        }
+        Assert.Equal(ElementMergeStrategy.MergeListOfPrimative, finalizers.MergeStrategy);
+    }
 
-        [TestMethod]
-        public async Task ArrayOfPrimativeCanHaveMergeExtensions()
-        {
-            // arrange
-            var provider = SharedProvider;
+    [Theory]
+    [InlineData("v2", "Pod")]
+    [InlineData("v1", "FluxCapacitor")]
+    public async Task NotFoundResourceKindComesProducesNull(string apiVersion, string kind)
+    {
+        var provider = SharedProvider;
 
-            // act
-            var pod = await provider.GetResourceKindAsync("v1", "Pod");
+        var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
 
-            // assert
-            var finalizers = pod.ShouldNotBeNull()
-                .Schema.ShouldNotBeNull()
-                .GetPropertyElementType("metadata").ShouldNotBeNull()
-                .GetPropertyElementType("finalizers").ShouldNotBeNull();
+        Assert.Null(resourceKind);
+    }
 
-            finalizers.MergeStrategy.ShouldBe(ElementMergeStrategy.MergeListOfPrimative);
-        }
+    [Fact]
+    public async Task DictionaryHasInformationAboutContents()
+    {
+        var provider = SharedProvider;
 
-        [TestMethod]
-        [DataRow("v2", "Pod")]
-        [DataRow("v1", "FluxCapacitor")]
-        public async Task NotFoundResourceKindComesProducesNull(string apiVersion, string kind)
-        {
-            // arrange
-            var provider = SharedProvider;
+        var pod = await provider.GetResourceKindAsync("v1", "Pod");
+        var labels = pod.Schema.GetPropertyElementType("metadata").GetPropertyElementType("labels");
 
-            // act
-            var resourceKind = await provider.GetResourceKindAsync(apiVersion, kind);
-
-            // assert
-            resourceKind.ShouldBeNull();
-        }
-
-        [TestMethod]
-        public async Task DictionaryHasInformationAboutContents()
-        {
-            // arrange
-            var provider = SharedProvider;
-
-            // act
-            var pod = await provider.GetResourceKindAsync("v1", "Pod");
-            var labels = pod.Schema.GetPropertyElementType("metadata").GetPropertyElementType("labels");
-
-            // assert
-            labels.MergeStrategy.ShouldBe(ElementMergeStrategy.MergeMap);
-            labels.GetCollectionElementType().MergeStrategy.ShouldBe(ElementMergeStrategy.ReplacePrimative);
-        }
+        Assert.Equal(ElementMergeStrategy.MergeMap, labels.MergeStrategy);
+        Assert.Equal(ElementMergeStrategy.ReplacePrimative, labels.GetCollectionElementType().MergeStrategy);
     }
 }

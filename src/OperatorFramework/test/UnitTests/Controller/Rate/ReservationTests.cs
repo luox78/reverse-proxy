@@ -3,121 +3,106 @@
 
 using Microsoft.Kubernetes.Controller.Rate;
 using Microsoft.Kubernetes.Fakes;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Shouldly;
 using System;
+using Xunit;
 
-namespace Microsoft.Kubernetes.Controllers.Rate
+namespace Microsoft.Kubernetes.Controllers.Rate;
+
+public class ReservationTests
 {
-    [TestClass]
-    public class ReservationTests
+    [Fact]
+    public void NotOkayAlwaysReturnsMaxValueDelay()
     {
-        [TestMethod]
-        public void NotOkayAlwaysReturnsMaxValueDelay()
-        {
-            // arrange 
-            var clock = new FakeSystemClock();
-            var reservation = new Reservation(
-                clock: clock,
-                limiter: default,
-                ok: false);
+        var clock = new FakeSystemClock();
+        var reservation = new Reservation(
+            clock: clock,
+            limiter: default,
+            ok: false);
 
-            // act
-            var delay1 = reservation.Delay();
-            var delayFrom1 = reservation.DelayFrom(clock.UtcNow);
-            clock.Advance(TimeSpan.FromMinutes(3));
-            var delay2 = reservation.Delay();
-            var delayFrom2 = reservation.DelayFrom(clock.UtcNow);
+        var delay1 = reservation.Delay();
+        var delayFrom1 = reservation.DelayFrom(clock.UtcNow);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var delay2 = reservation.Delay();
+        var delayFrom2 = reservation.DelayFrom(clock.UtcNow);
 
-            // assert
-            delay1.ShouldBe(TimeSpan.MaxValue);
-            delayFrom1.ShouldBe(TimeSpan.MaxValue);
-            delay2.ShouldBe(TimeSpan.MaxValue);
-            delayFrom2.ShouldBe(TimeSpan.MaxValue);
-        }
+        Assert.Equal(TimeSpan.MaxValue, delay1);
+        Assert.Equal(TimeSpan.MaxValue, delayFrom1);
+        Assert.Equal(TimeSpan.MaxValue, delay2);
+        Assert.Equal(TimeSpan.MaxValue, delayFrom2);
+    }
 
-        [TestMethod]
-        public void DelayIsZeroWhenTimeToActIsNowOrEarlier()
-        {
-            // arrange 
-            var clock = new FakeSystemClock();
-            var reservation = new Reservation(
-                clock: clock,
-                limiter: default,
-                ok: true,
-                timeToAct: clock.UtcNow,
-                limit: default);
+    [Fact]
+    public void DelayIsZeroWhenTimeToActIsNowOrEarlier()
+    {
+        var clock = new FakeSystemClock();
+        var reservation = new Reservation(
+            clock: clock,
+            limiter: default,
+            ok: true,
+            timeToAct: clock.UtcNow,
+            limit: default);
 
-            // act
-            var delay1 = reservation.Delay();
-            var delayFrom1 = reservation.DelayFrom(clock.UtcNow);
-            clock.Advance(TimeSpan.FromMinutes(3));
-            var delay2 = reservation.Delay();
-            var delayFrom2 = reservation.DelayFrom(clock.UtcNow);
+        var delay1 = reservation.Delay();
+        var delayFrom1 = reservation.DelayFrom(clock.UtcNow);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var delay2 = reservation.Delay();
+        var delayFrom2 = reservation.DelayFrom(clock.UtcNow);
 
-            // assert
-            delay1.ShouldBe(TimeSpan.Zero);
-            delayFrom1.ShouldBe(TimeSpan.Zero);
-            delay2.ShouldBe(TimeSpan.Zero);
-            delayFrom2.ShouldBe(TimeSpan.Zero);
-        }
+        Assert.Equal(TimeSpan.Zero, delay1);
+        Assert.Equal(TimeSpan.Zero, delayFrom1);
+        Assert.Equal(TimeSpan.Zero, delay2);
+        Assert.Equal(TimeSpan.Zero, delayFrom2);
+    }
 
-        [TestMethod]
-        public void DelayGetsSmallerAsTimePasses()
-        {
-            // arrange 
-            var clock = new FakeSystemClock();
-            var reservation = new Reservation(
-                clock: clock,
-                limiter: default,
-                ok: true,
-                timeToAct: clock.UtcNow.Add(TimeSpan.FromMinutes(5)),
-                limit: default);
+    [Fact]
+    public void DelayGetsSmallerAsTimePasses()
+    {
+        var clock = new FakeSystemClock();
+        var reservation = new Reservation(
+            clock: clock,
+            limiter: default,
+            ok: true,
+            timeToAct: clock.UtcNow.Add(TimeSpan.FromMinutes(5)),
+            limit: default);
 
-            // act
-            var delay1 = reservation.Delay();
-            clock.Advance(TimeSpan.FromMinutes(3));
-            var delay2 = reservation.Delay();
-            clock.Advance(TimeSpan.FromMinutes(3));
-            var delay3 = reservation.Delay();
+        var delay1 = reservation.Delay();
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var delay2 = reservation.Delay();
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var delay3 = reservation.Delay();
 
-            // assert
-            delay1.ShouldBe(TimeSpan.FromMinutes(5));
-            delay2.ShouldBe(TimeSpan.FromMinutes(2));
-            delay3.ShouldBe(TimeSpan.Zero);
-        }
+        Assert.Equal(TimeSpan.FromMinutes(5), delay1);
+        Assert.Equal(TimeSpan.FromMinutes(2), delay2);
+        Assert.Equal(TimeSpan.Zero, delay3);
+    }
 
-        [TestMethod]
-        public void DelayFromNotChangedByTimePassing()
-        {
-            // arrange 
-            var clock = new FakeSystemClock();
-            var reservation = new Reservation(
-                clock: clock,
-                limiter: default,
-                ok: true,
-                timeToAct: clock.UtcNow.Add(TimeSpan.FromMinutes(5)),
-                limit: default);
+    [Fact]
+    public void DelayFromNotChangedByTimePassing()
+    {
+        var clock = new FakeSystemClock();
+        var reservation = new Reservation(
+            clock: clock,
+            limiter: default,
+            ok: true,
+            timeToAct: clock.UtcNow.Add(TimeSpan.FromMinutes(5)),
+            limit: default);
 
-            var twoMinutesPast = clock.UtcNow.Subtract(TimeSpan.FromMinutes(2));
-            var twoMinutesFuture = clock.UtcNow.Add(TimeSpan.FromMinutes(2));
+        var twoMinutesPast = clock.UtcNow.Subtract(TimeSpan.FromMinutes(2));
+        var twoMinutesFuture = clock.UtcNow.Add(TimeSpan.FromMinutes(2));
 
-            // act
-            var delay1 = reservation.DelayFrom(clock.UtcNow);
-            var delayPast1 = reservation.DelayFrom(twoMinutesPast);
-            var delayFuture1 = reservation.DelayFrom(twoMinutesFuture);
-            clock.Advance(TimeSpan.FromMinutes(3));
-            var delay2 = reservation.DelayFrom(clock.UtcNow);
-            var delayPast2 = reservation.DelayFrom(twoMinutesPast);
-            var delayFuture2 = reservation.DelayFrom(twoMinutesFuture);
+        var delay1 = reservation.DelayFrom(clock.UtcNow);
+        var delayPast1 = reservation.DelayFrom(twoMinutesPast);
+        var delayFuture1 = reservation.DelayFrom(twoMinutesFuture);
+        clock.Advance(TimeSpan.FromMinutes(3));
+        var delay2 = reservation.DelayFrom(clock.UtcNow);
+        var delayPast2 = reservation.DelayFrom(twoMinutesPast);
+        var delayFuture2 = reservation.DelayFrom(twoMinutesFuture);
 
-            // assert
-            delay1.ShouldBe(TimeSpan.FromMinutes(5));
-            delayPast1.ShouldBe(TimeSpan.FromMinutes(7));
-            delayFuture1.ShouldBe(TimeSpan.FromMinutes(3));
-            delay2.ShouldBe(TimeSpan.FromMinutes(2));
-            delayPast2.ShouldBe(TimeSpan.FromMinutes(7));
-            delayFuture2.ShouldBe(TimeSpan.FromMinutes(3));
-        }
+        Assert.Equal(TimeSpan.FromMinutes(5), delay1);
+        Assert.Equal(TimeSpan.FromMinutes(7), delayPast1);
+        Assert.Equal(TimeSpan.FromMinutes(3), delayFuture1);
+        Assert.Equal(TimeSpan.FromMinutes(2), delay2);
+        Assert.Equal(TimeSpan.FromMinutes(7), delayPast2);
+        Assert.Equal(TimeSpan.FromMinutes(3), delayFuture2);
     }
 }

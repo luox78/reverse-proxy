@@ -4,57 +4,45 @@
 using k8s;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Kubernetes.Resources;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Shouldly;
+using Xunit;
 
-namespace Microsoft.Kubernetes
+namespace Microsoft.Kubernetes;
+
+public class KubernetesCoreExtensionsTests
 {
-    [TestClass]
-    public class KubernetesCoreExtensionsTests
+    [Fact]
+    public void KubernetesClientIsAdded()
     {
-        [TestMethod]
-        public void KubernetesClientIsAdded()
-        {
-            // arrange 
-            var services = new ServiceCollection();
+        var services = new ServiceCollection();
 
-            // act
-            services.AddKubernetesCore();
+        services.AddKubernetesCore();
 
-            // assert
-            var serviceProvider = services.BuildServiceProvider();
-            serviceProvider.GetService<IKubernetes>().ShouldNotBeNull();
-        }
+        var serviceProvider = services.BuildServiceProvider();
+        Assert.NotNull(serviceProvider.GetService<IKubernetes>());
+    }
 
-        [TestMethod]
-        public void HelperServicesAreAdded()
-        {
-            // arrange 
-            var services = new ServiceCollection();
+    [Fact]
+    public void HelperServicesAreAdded()
+    {
+        var services = new ServiceCollection();
 
-            // act
-            services.AddKubernetesCore();
+        services.AddKubernetesCore();
 
-            // assert
-            var serviceProvider = services.BuildServiceProvider();
-            serviceProvider.GetService<IResourceSerializers>().ShouldNotBeNull();
-        }
+        var serviceProvider = services.BuildServiceProvider();
+        Assert.NotNull(serviceProvider.GetService<IResourceSerializers>());
+    }
 
 
-        [TestMethod]
-        public void ExistingClientIsNotReplaced()
-        {
-            // arrange 
-            using var client = new k8s.Kubernetes(KubernetesClientConfiguration.BuildDefaultConfig());
-            var services = new ServiceCollection();
+    [Fact]
+    public void ExistingClientIsNotReplaced()
+    {
+        using var client = new k8s.Kubernetes(KubernetesClientConfiguration.BuildDefaultConfig());
+        var services = new ServiceCollection();
 
-            // act
-            services.AddSingleton<IKubernetes>(client);
-            services.AddKubernetesCore();
+        services.AddSingleton<IKubernetes>(client);
+        services.AddKubernetesCore();
 
-            // assert
-            var serviceProvider = services.BuildServiceProvider();
-            serviceProvider.GetService<IKubernetes>().ShouldBeSameAs(client);
-        }
+        var serviceProvider = services.BuildServiceProvider();
+        Assert.Same(client, serviceProvider.GetService<IKubernetes>());
     }
 }

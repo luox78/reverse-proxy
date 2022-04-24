@@ -3,85 +3,82 @@
 
 using Microsoft.Kubernetes.ResourceKinds;
 using Microsoft.Kubernetes.Resources.Models;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Shouldly;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Xunit;
 
-namespace Microsoft.Kubernetes.Resources
+namespace Microsoft.Kubernetes.Resources;
+
+public abstract partial class ResourcePatcherTestsBase
 {
-    [TestClass]
-    public abstract partial class ResourcePatcherTestsBase
+    public virtual IResourceKindManager Manager { get; set; }
+
+    public async Task RunStandardTest(StandardTestYaml testYaml)
     {
-        public virtual IResourceKindManager Manager { get; set; }
-
-        public async Task RunStandardTest(StandardTestYaml testYaml)
+        if (testYaml is null)
         {
-            if (testYaml is null)
-            {
-                throw new ArgumentNullException(nameof(testYaml));
-            }
-
-            await RunThreeWayMerge(testYaml);
-            if (!testYaml.Patch.Any(operation => operation.Op == "remove"))
-            {
-                await RunApplyLiveOnlyMerge(testYaml);
-            }
+            throw new ArgumentNullException(nameof(testYaml));
         }
 
-        private async Task RunThreeWayMerge(StandardTestYaml testYaml)
+        await RunThreeWayMerge(testYaml);
+        if (!testYaml.Patch.Any(operation => operation.Op == "remove"))
         {
-            // arrange
-            IResourcePatcher patcher = new ResourcePatcher();
+            await RunApplyLiveOnlyMerge(testYaml);
+        }
+    }
 
-            // act
-            var parameters = new CreatePatchParameters
-            {
-                ApplyResource = testYaml.Apply,
-                LastAppliedResource = testYaml.LastApplied,
-                LiveResource = testYaml.Live,
-            };
+    private async Task RunThreeWayMerge(StandardTestYaml testYaml)
+    {
+        IResourcePatcher patcher = new ResourcePatcher();
 
-            if (testYaml.ResourceKind != null)
-            {
-                parameters.ResourceKind = await Manager.GetResourceKindAsync(
-                    testYaml.ResourceKind.ApiVersion,
-                    testYaml.ResourceKind.Kind);
-            }
+        var parameters = new CreatePatchParameters
+        {
+            ApplyResource = testYaml.Apply,
+            LastAppliedResource = testYaml.LastApplied,
+            LiveResource = testYaml.Live,
+        };
 
-            var patch = patcher.CreateJsonPatch(parameters);
-
-            // assert
-            var operations = new ResourceSerializers().Convert<PatchOperation[]>(patch);
-            operations.ShouldBe(testYaml.Patch, ignoreOrder: true);
+        if (testYaml.ResourceKind is not null)
+        {
+            parameters.ResourceKind = await Manager.GetResourceKindAsync(
+                testYaml.ResourceKind.ApiVersion,
+                testYaml.ResourceKind.Kind);
         }
 
-        private async Task RunApplyLiveOnlyMerge(StandardTestYaml testYaml)
+        var patch = patcher.CreateJsonPatch(parameters);
+
+        var operations = new ResourceSerializers().Convert<List<PatchOperation>>(patch);
+
+        var expected = testYaml.Patch.OrderBy(op => op.ToString()).ToList();
+        operations = operations.OrderBy(op => op.ToString()).ToList();
+        Assert.Equal(expected, operations);
+    }
+
+    private async Task RunApplyLiveOnlyMerge(StandardTestYaml testYaml)
+    {
+        IResourcePatcher patcher = new ResourcePatcher();
+
+        var parameters = new CreatePatchParameters
         {
-            // arrange
-            IResourcePatcher patcher = new ResourcePatcher();
+            ApplyResource = testYaml.Apply,
+            LiveResource = testYaml.Live,
+        };
 
-            // act
-            var parameters = new CreatePatchParameters
-            {
-                ApplyResource = testYaml.Apply,
-                LiveResource = testYaml.Live,
-            };
-
-            if (testYaml.ResourceKind != null)
-            {
-                parameters.ResourceKind = await Manager.GetResourceKindAsync(
-                    testYaml.ResourceKind.ApiVersion,
-                    testYaml.ResourceKind.Kind);
-            }
-
-            var patch = patcher.CreateJsonPatch(parameters);
-
-            // assert
-            var operations = new ResourceSerializers().Convert<List<PatchOperation>>(patch);
-            operations.ShouldBe(testYaml.Patch, ignoreOrder: true);
+        if (testYaml.ResourceKind is not null)
+        {
+            parameters.ResourceKind = await Manager.GetResourceKindAsync(
+                testYaml.ResourceKind.ApiVersion,
+                testYaml.ResourceKind.Kind);
         }
+
+        var patch = patcher.CreateJsonPatch(parameters);
+
+        var operations = new ResourceSerializers().Convert<List<PatchOperation>>(patch);
+
+        var expected = testYaml.Patch.OrderBy(op => op.ToString()).ToList();
+        operations = operations.OrderBy(op => op.ToString()).ToList();
+        Assert.Equal(expected, operations);
     }
 }

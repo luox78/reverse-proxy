@@ -6,105 +6,90 @@ using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Kubernetes.Controller.Hosting.Fakes;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
-using Shouldly;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using Xunit;
 
-namespace Microsoft.Kubernetes.Controller.Hosting
+namespace Microsoft.Kubernetes.Controller.Hosting;
+
+public class BackgroundHostedServiceTests
 {
-
-    [TestClass]
-    public class BackgroundHostedServiceTests
+    [Fact]
+    public async Task StartAndStopUnderHosting()
     {
-        [TestMethod]
-        public async Task StartAndStopUnderHosting()
-        {
-            // arrange
-            var latches = new TestLatches();
+        var latches = new TestLatches();
 
-            using var host = new HostBuilder()
-                .ConfigureServices((hbc, services) =>
-                {
-                    services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
-                    services.AddSingleton(latches);
-                })
-                .Build();
+        using var host = new HostBuilder()
+            .ConfigureServices((hbc, services) =>
+            {
+                services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
+                services.AddSingleton(latches);
+            })
+            .Build();
 
-            // act
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-            await host.StartAsync(cts.Token).ConfigureAwait(false);
-            await latches.RunEnter.WhenSignalAsync(cts.Token).ConfigureAwait(false);
-            latches.RunResult.Signal();
-            await latches.RunExit.WhenSignalAsync(cts.Token).ConfigureAwait(false);
-            await host.StopAsync(cts.Token).ConfigureAwait(false);
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        await host.StartAsync(cts.Token).ConfigureAwait(false);
+        await latches.RunEnter.WhenSignalAsync(cts.Token).ConfigureAwait(false);
+        latches.RunResult.Signal();
+        await latches.RunExit.WhenSignalAsync(cts.Token).ConfigureAwait(false);
+        await host.StopAsync(cts.Token).ConfigureAwait(false);
+    }
 
-            // assert
-        }
+    [Fact]
+    public async Task StartAndStopUnderWebHost()
+    {
+        var latches = new TestLatches();
 
-        [TestMethod]
-        public async Task StartAndStopUnderWebHost()
-        {
-            // arrange
-            var latches = new TestLatches();
+        using var host = new WebHostBuilder()
+            .ConfigureServices((hbc, services) =>
+            {
+                services.AddSingleton<IServer, FakeServer>();
+                services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
+                services.AddSingleton(latches);
+            })
+            .Configure(app => { })
+            .Build();
 
-            using var host = new WebHostBuilder()
-                .ConfigureServices((hbc, services) =>
-                {
-                    services.AddSingleton<IServer, FakeServer>();
-                    services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
-                    services.AddSingleton(latches);
-                })
-                .Configure(app => { })
-                .Build();
+        // TODO: figure out why the hosting takes so long to unwind naturally
+        // and increase this safety cancellation up from 3 seconds
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
 
-            // act
-            // TODO: figure out why the hosting takes so long to unwind naturally
-            // and increase this safety cancellation up from 3 seconds
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var runTask = host.RunAsync(cts.Token);
 
-            var runTask = host.RunAsync(cts.Token);
+        await latches.RunEnter.WhenSignalAsync(cts.Token).ConfigureAwait(false);
+        latches.RunResult.Signal();
+        await latches.RunExit.WhenSignalAsync(cts.Token).ConfigureAwait(false);
 
-            await latches.RunEnter.WhenSignalAsync(cts.Token).ConfigureAwait(false);
-            latches.RunResult.Signal();
-            await latches.RunExit.WhenSignalAsync(cts.Token).ConfigureAwait(false);
-
-            await runTask.ConfigureAwait(false);
-
-            // assert
-        }
+        await runTask.ConfigureAwait(false);
+    }
 
 
-        [TestMethod]
-        public async Task IfRunAsyncThrowsItComesBackFromHost()
-        {
-            // arrange
-            var context = new TestLatches();
+    [Fact]
+    public async Task IfRunAsyncThrowsItComesBackFromHost()
+    {
+        var context = new TestLatches();
 
-            using var host = new WebHostBuilder()
-                .ConfigureServices((hbc, services) =>
-                {
-                    services.AddSingleton<IServer, FakeServer>();
-                    services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
-                    services.AddSingleton(context);
-                })
-                .Configure(app => { })
-                .Build();
+        using var host = new WebHostBuilder()
+            .ConfigureServices((hbc, services) =>
+            {
+                services.AddSingleton<IServer, FakeServer>();
+                services.AddSingleton<IHostedService, FakeBackgroundHostedService>();
+                services.AddSingleton(context);
+            })
+            .Configure(app => { })
+            .Build();
 
-            // act
-            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 
-            var runTask = host.RunAsync(cts.Token);
+        var runTask = host.RunAsync(cts.Token);
 
 #pragma warning disable CA1303 // Do not pass literals as localized parameters
-            context.RunResult.Throw(new ApplicationException("Unwind"));
+        context.RunResult.Throw(new ApplicationException("Unwind"));
 #pragma warning restore CA1303 // Do not pass literals as localized parameters
 
-            var ex = await Should.ThrowAsync<AggregateException>(runTask).ConfigureAwait(false);
+        var ex = await Assert.ThrowsAsync<AggregateException>(() => runTask);
 
-            // assert
-            ex.Flatten().InnerExceptions.ShouldHaveSingleItem().Message.ShouldBe("Unwind");
-        }
+        Assert.Equal("Unwind", Assert.Single(ex.Flatten().InnerExceptions).Message);
     }
 }

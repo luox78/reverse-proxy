@@ -2,83 +2,75 @@
 // Licensed under the MIT License.
 
 using k8s.Models;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
 using Newtonsoft.Json.Linq;
-using Shouldly;
+using System;
 using System.Collections.Generic;
+using Xunit;
 
-namespace Microsoft.Kubernetes.Resources
+namespace Microsoft.Kubernetes.Resources;
+
+public class ResourceSerializersTests
 {
-    [TestClass]
-    public class ResourceSerializersTests
+    private IResourceSerializers Serializers { get; } = new ResourceSerializers();
+
+    [Fact]
+    public void ResourceSerializesToJson()
     {
-        private IResourceSerializers Serializers { get; } = new ResourceSerializers();
+        var resource = new V1Role(
+            apiVersion: $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}",
+            kind: V1Role.KubeKind,
+            metadata: new V1ObjectMeta(
+                namespaceProperty: "the-namespace",
+                name: "the-name"),
+            rules: new[]
+            {
+                new V1PolicyRule(
+                    resourceNames: new []{"*"},
+                    verbs: new []{"*"}),
+            });
 
-        [TestMethod]
-        public void ResourceSerializesToJson()
-        {
-            // arrange
-            var resource = new V1Role(
-                apiVersion: $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}",
-                kind: V1Role.KubeKind,
-                metadata: new V1ObjectMeta(
-                    namespaceProperty: "the-namespace",
-                    name: "the-name"),
-                rules: new[]
-                {
-                    new V1PolicyRule(
-                        resourceNames: new []{"*"},
-                        verbs: new []{"*"}),
-                });
+        var json = Serializers.SerializeJson(resource);
 
-            // act
-            var json = Serializers.SerializeJson(resource);
+        Assert.Contains(@"""kind"":""Role""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""apiVersion"":""rbac.authorization.k8s.io/v1""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""name"":""the-name""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""namespace"":""the-namespace""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""resourceNames"":[""*""]", json, StringComparison.Ordinal);
+        Assert.Contains(@"""verbs"":[""*""]", json, StringComparison.Ordinal);
+    }
 
-            // assert
-            json.ShouldContain(@"""kind"":""Role""");
-            json.ShouldContain(@"""apiVersion"":""rbac.authorization.k8s.io/v1""");
-            json.ShouldContain(@"""name"":""the-name""");
-            json.ShouldContain(@"""namespace"":""the-namespace""");
-            json.ShouldContain(@"""resourceNames"":[""*""]");
-            json.ShouldContain(@"""verbs"":[""*""]");
-        }
+    [Fact]
+    public void DictionarySerializesToJson()
+    {
+        var dictionary = new Dictionary<string, object> {
+            { "apiVersion", $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}" },
+            { "kind", V1Role.KubeKind },
+            { "metadata", new Dictionary<string, object>{
+                { "name", "the-name" } ,
+                { "namespace", "the-namespace" } ,
+            }},
+            { "rules", new List<object>{
+                new Dictionary<string, object>{
+                    { "resourceNames", new List<object> { "*" } },
+                    { "verbs", new List<object> { "*" } },
+                },
+            }},
+        };
 
-        [TestMethod]
-        public void DictionarySerializesToJson()
-        {
-            // arrange
-            var dictionary = new Dictionary<string, object> {
-                { "apiVersion", $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}" },
-                { "kind", V1Role.KubeKind },
-                { "metadata", new Dictionary<string, object>{
-                    { "name", "the-name" } ,
-                    { "namespace", "the-namespace" } ,
-                }},
-                { "rules", new List<object>{
-                    new Dictionary<string, object>{
-                        { "resourceNames", new List<object> { "*" } },
-                        { "verbs", new List<object> { "*" } },
-                    },
-                }},
-            };
+        var json = Serializers.SerializeJson(dictionary);
 
-            // act
-            var json = Serializers.SerializeJson(dictionary);
+        Assert.Contains(@"""kind"":""Role""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""apiVersion"":""rbac.authorization.k8s.io/v1""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""name"":""the-name""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""namespace"":""the-namespace""", json, StringComparison.Ordinal);
+        Assert.Contains(@"""resourceNames"":[""*""]", json, StringComparison.Ordinal);
+        Assert.Contains(@"""verbs"":[""*""]", json, StringComparison.Ordinal);
+    }
 
-            // assert
-            json.ShouldContain(@"""kind"":""Role""");
-            json.ShouldContain(@"""apiVersion"":""rbac.authorization.k8s.io/v1""");
-            json.ShouldContain(@"""name"":""the-name""");
-            json.ShouldContain(@"""namespace"":""the-namespace""");
-            json.ShouldContain(@"""resourceNames"":[""*""]");
-            json.ShouldContain(@"""verbs"":[""*""]");
-        }
-
-        [TestMethod]
-        public void DeserializeJsonToResource()
-        {
-            // arrange
-            var json = $@"
+    [Fact]
+    public void DeserializeJsonToResource()
+    {
+        var json = $@"
 {{
     ""apiVersion"": ""{V1Role.KubeGroup}/{V1Role.KubeApiVersion}"",
     ""kind"": ""Role"",
@@ -93,24 +85,21 @@ namespace Microsoft.Kubernetes.Resources
 }}
 ";
 
-            // act
-            var role = Serializers.DeserializeJson<V1Role>(json);
+        var role = Serializers.DeserializeJson<V1Role>(json);
 
-            // assert
-            role.ApiGroupAndVersion().ShouldBe(("rbac.authorization.k8s.io", "v1"));
-            role.Kind.ShouldBe("Role");
-            role.Name().ShouldBe("the-name");
-            role.Namespace().ShouldBe("the-namespace");
-            var rule = role.Rules.ShouldHaveSingleItem();
-            rule.ResourceNames.ShouldBe(new[] { "*" });
-            rule.Verbs.ShouldBe(new[] { "*" });
-        }
+        Assert.Equal(("rbac.authorization.k8s.io", "v1"), role.ApiGroupAndVersion());
+        Assert.Equal("Role", role.Kind);
+        Assert.Equal("the-name", role.Name());
+        Assert.Equal("the-namespace", role.Namespace());
+        var rule = Assert.Single(role.Rules);
+        Assert.Equal(new[] { "*" }, rule.ResourceNames);
+        Assert.Equal(new[] { "*" }, rule.Verbs);
+    }
 
-        [TestMethod]
-        public void DeserializeYamlToResource()
-        {
-            // arrange
-            var yaml = $@"
+    [Fact]
+    public void DeserializeYamlToResource()
+    {
+        var yaml = $@"
 apiVersion: {V1Role.KubeGroup}/{V1Role.KubeApiVersion}
 kind: Role
 metadata: 
@@ -123,73 +112,64 @@ rules:
   - ""*""
 ";
 
-            // act
-            var role = Serializers.DeserializeYaml<V1Role>(yaml);
+        var role = Serializers.DeserializeYaml<V1Role>(yaml);
 
-            // assert
-            role.ApiGroupAndVersion().ShouldBe(("rbac.authorization.k8s.io", "v1"));
-            role.Kind.ShouldBe("Role");
-            role.Name().ShouldBe("the-name");
-            role.Namespace().ShouldBe("the-namespace");
-            var rule = role.Rules.ShouldHaveSingleItem();
-            rule.ResourceNames.ShouldBe(new[] { "*" });
-            rule.Verbs.ShouldBe(new[] { "*" });
-        }
+        Assert.Equal(("rbac.authorization.k8s.io", "v1"), role.ApiGroupAndVersion());
+        Assert.Equal("Role", role.Kind);
+        Assert.Equal("the-name", role.Name());
+        Assert.Equal("the-namespace", role.Namespace());
+        var rule = Assert.Single(role.Rules);
+        Assert.Equal(new[] { "*" }, rule.ResourceNames);
+        Assert.Equal(new[] { "*" }, rule.Verbs);
+    }
 
-        [TestMethod]
-        public void ConvertDictionaryToResource()
-        {
-            // arrange
-            var dictionary = new Dictionary<string, object> {
-                { "apiVersion", $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}" },
-                { "kind", V1Role.KubeKind },
-                { "metadata", new Dictionary<string, object>{
-                    { "name", "the-name" } ,
-                    { "namespace", "the-namespace" } ,
-                }},
-                { "rules", new List<object>{
-                    new Dictionary<string, object>{
-                        { "resourceNames", new List<object> { "*" } },
-                        { "verbs", new List<object> { "*" } },
-                    },
-                }},
-            };
+    [Fact]
+    public void ConvertDictionaryToResource()
+    {
+        var dictionary = new Dictionary<string, object> {
+            { "apiVersion", $"{V1Role.KubeGroup}/{V1Role.KubeApiVersion}" },
+            { "kind", V1Role.KubeKind },
+            { "metadata", new Dictionary<string, object>{
+                { "name", "the-name" } ,
+                { "namespace", "the-namespace" } ,
+            }},
+            { "rules", new List<object>{
+                new Dictionary<string, object>{
+                    { "resourceNames", new List<object> { "*" } },
+                    { "verbs", new List<object> { "*" } },
+                },
+            }},
+        };
 
-            // act
-            var role = Serializers.Convert<V1Role>(dictionary);
+        var role = Serializers.Convert<V1Role>(dictionary);
 
-            // assert
-            role.ApiGroupAndVersion().ShouldBe(("rbac.authorization.k8s.io", "v1"));
-            role.Kind.ShouldBe("Role");
-            role.Name().ShouldBe("the-name");
-            role.Namespace().ShouldBe("the-namespace");
-            var rule = role.Rules.ShouldHaveSingleItem();
-            rule.ResourceNames.ShouldBe(new[] { "*" });
-            rule.Verbs.ShouldBe(new[] { "*" });
-        }
+        Assert.Equal(("rbac.authorization.k8s.io", "v1"), role.ApiGroupAndVersion());
+        Assert.Equal("Role", role.Kind);
+        Assert.Equal("the-name", role.Name());
+        Assert.Equal("the-namespace", role.Namespace());
+        var rule = Assert.Single(role.Rules);
+        Assert.Equal(new[] { "*" }, rule.ResourceNames);
+        Assert.Equal(new[] { "*" }, rule.Verbs);
+    }
 
-        [TestMethod]
-        public void DeserializeUntypedYamlWithIntDoubleAndBool()
-        {
-            // arrange
-            var yaml = @"
+    [Fact]
+    public void DeserializeUntypedYamlWithIntDoubleAndBool()
+    {
+        var yaml = @"
 an-object:
     an-integer: 1
     a-float: 1.0
     a-bool: true
-    a-string: 1.0.
+    a-string: ""1.0.""
 ";
 
-            // act
-            var data = Serializers.DeserializeYaml<object>(yaml);
+        var data = Serializers.DeserializeYaml<object>(yaml);
 
-            // assert
-            var root = data.ShouldBeOfType<JObject>();
-            var anObject = root["an-object"].ShouldBeOfType<JObject>();
-            anObject["an-integer"].Type.ShouldBe(JTokenType.Integer);
-            anObject["a-float"].Type.ShouldBe(JTokenType.Float);
-            anObject["a-bool"].Type.ShouldBe(JTokenType.Boolean);
-            anObject["a-string"].Type.ShouldBe(JTokenType.String);
-        }
+        var root = Assert.IsType<JObject>(data);
+        var anObject = Assert.IsType<JObject>(root["an-object"]);
+        Assert.Equal(JTokenType.Integer, anObject["an-integer"].Type);
+        Assert.Equal(JTokenType.Float, anObject["a-float"].Type);
+        Assert.Equal(JTokenType.Boolean, anObject["a-bool"].Type);
+        Assert.Equal(JTokenType.String, anObject["a-string"].Type);
     }
 }
