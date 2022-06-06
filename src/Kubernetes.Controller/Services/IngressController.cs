@@ -2,26 +2,23 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using k8s;
 using k8s.Models;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Kubernetes;
-using Microsoft.Kubernetes.Controller.Hosting;
-using Microsoft.Kubernetes.Controller.Informers;
-using Microsoft.Kubernetes.Controller.Queues;
 using Yarp.Kubernetes.Controller.Caching;
-using Yarp.Kubernetes.Controller.Dispatching;
+using Yarp.Kubernetes.Controller.Client;
+using Yarp.Kubernetes.Controller.Hosting;
+using Yarp.Kubernetes.Controller.Queues;
 
 namespace Yarp.Kubernetes.Controller.Services;
 
 /// <summary>
 /// Controller receives notifications from informers. The data which is needed for processing is
 /// saved in a <see cref="ICache"/> instance and resources which need to be reconciled are
-/// added to an <see cref="IRateLimitingQueue{QueueItem}"/>. The background task dequeues
+/// added to an <see cref="ProcessingRateLimitedQueue{QueueItem}"/>. The background task dequeues
 /// items and passes them to an <see cref="IReconciler"/> service for processing.
 /// </summary>
 public class IngressController : BackgroundHostedService
@@ -93,10 +90,8 @@ public class IngressController : BackgroundHostedService
 
         _cache = cache ?? throw new ArgumentNullException(nameof(cache));
         _reconciler = reconciler ?? throw new ArgumentNullException(nameof(reconciler));
-        _reconciler.OnAttach(TargetAttached);
 
-        _ingressChangeQueueItem = new QueueItem("Ingress Change", null);
-
+        _ingressChangeQueueItem = new QueueItem("Ingress Change");
     }
 
     /// <summary>
@@ -116,22 +111,6 @@ public class IngressController : BackgroundHostedService
         }
 
         base.Dispose(disposing);
-    }
-
-    /// <summary>
-    /// Called each time a new connection arrives on the /api/dispatch endpoint.
-    /// All of the currently-known Ingress names are queued up to be sent
-    /// to the new target.
-    /// </summary>
-    /// <param name="target">The interface to target a connected client.</param>
-    private void TargetAttached(IDispatchTarget target)
-    {
-        var keys = new List<NamespacedName>();
-        _cache.GetKeys(keys);
-        if (keys.Count > 0)
-        {
-            _queue.Add(new QueueItem("Target Attached", target));
-        }
     }
 
     /// <summary>
@@ -221,28 +200,27 @@ public class IngressController : BackgroundHostedService
             var (item, shutdown) = await _queue.GetAsync(cancellationToken).ConfigureAwait(false);
             if (shutdown)
             {
+                Logger.LogInformation("Work queue has been shutdown. Exiting reconciliation loop.");
                 return;
             }
 
             try
             {
                 await _reconciler.ProcessAsync(cancellationToken).ConfigureAwait(false);
-
-                // calling Done after GetAsync informs the queue
-                // that the item is no longer being actively processed
-                _queue.Done(item);
             }
-#pragma warning disable CA1031 // Do not catch general exception types
             catch
-#pragma warning restore CA1031 // Do not catch general exception types
             {
-#pragma warning disable CA1303 // Do not pass literals as localized parameters
                 Logger.LogInformation("Rescheduling {Change}", item.Change);
-#pragma warning restore CA1303 // Do not pass literals as localized parameters
 
                 // Any failure to process this item results in being re-queued
                 _queue.Add(item);
             }
+            finally
+            {
+                _queue.Done(item);
+            }
         }
+
+        Logger.LogInformation("Reconciliation loop cancelled");
     }
 }

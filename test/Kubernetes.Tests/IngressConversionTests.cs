@@ -14,7 +14,6 @@ using k8s;
 using k8s.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using Microsoft.Kubernetes;
 using Moq;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
@@ -23,14 +22,13 @@ using Xunit;
 using Yarp.Kubernetes.Controller;
 using Yarp.Kubernetes.Controller.Caching;
 using Yarp.Kubernetes.Controller.Converters;
-using Yarp.Kubernetes.Controller.Services;
 using JsonSerializer = System.Text.Json.JsonSerializer;
 
-namespace IngressController.Tests;
+namespace Yarp.Kubernetes.Tests;
 
-public class IngressControllerTests
+public class IngressConversionTests
 {
-    public IngressControllerTests()
+    public IngressConversionTests()
     {
         JsonConvert.DefaultSettings = () => new JsonSerializerSettings() {
             NullValueHandling = NullValueHandling.Ignore,
@@ -45,11 +43,13 @@ public class IngressControllerTests
     [InlineData("exact-match")]
     [InlineData("annotations")]
     [InlineData("mapped-port")]
+    [InlineData("port-mismatch")]
     [InlineData("hostname-routing")]
     [InlineData("multiple-ingresses")]
     [InlineData("multiple-ingresses-one-svc")]
     [InlineData("multiple-namespaces")]
     [InlineData("route-metadata")]
+    [InlineData("missing-svc")]
     public async Task ParsingTests(string name)
     {
         var ingressClass = KubeResourceGenerator.CreateIngressClass("yarp", "microsoft.com/ingress-yarp", true);
@@ -80,30 +80,31 @@ public class IngressControllerTests
         VerifyJson(routesJson, name, "routes.json");
     }
 
-        private static string StripNullProperties(string json)
+    private static string StripNullProperties(string json)
+    {
+        using var reader = new JsonTextReader(new StringReader(json));
+        var sb = new StringBuilder();
+        using var sw = new StringWriter(sb);
+        using var writer = new JsonTextWriter(sw);
+        while (reader.Read())
         {
-            using var reader = new JsonTextReader(new StringReader(json));
-            var sb = new StringBuilder();
-            using var sw = new StringWriter(sb);
-            using var writer = new JsonTextWriter(sw);
-            while (reader.Read())
+            var token = reader.TokenType;
+            var value = reader.Value;
+            if(reader.TokenType == JsonToken.PropertyName)
             {
-                var token = reader.TokenType;
-                var value = reader.Value;
-                if(reader.TokenType == JsonToken.PropertyName)
+                reader.Read();
+                if (reader.TokenType == JsonToken.Null)
                 {
-                    reader.Read();
-                    if (reader.TokenType == JsonToken.Null)
-                    {
-                        continue;
-                    }
-                    writer.WriteToken(token, value);
+                    continue;
                 }
-                writer.WriteToken(reader.TokenType, reader.Value);
+                writer.WriteToken(token, value);
             }
-
-            return sb.ToString();
+            writer.WriteToken(reader.TokenType, reader.Value);
         }
+
+        return sb.ToString();
+    }
+
     private static void VerifyJson(string json, string name, string fileName)
     {
         var other = File.ReadAllText(Path.Combine("testassets", name, fileName));

@@ -2,10 +2,11 @@
 
   <PropertyGroup>
     <Description>Yarp.ReverseProxy extension package for in-process telemetry consumption</Description>
-    <TargetFrameworks>net6.0;net5.0;netcoreapp3.1</TargetFrameworks>
+    <TargetFrameworks>net6.0</TargetFrameworks>
     <OutputType>Library</OutputType>
     <RootNamespace>Yarp.Telemetry.Consumption</RootNamespace>
     <Nullable>enable</Nullable>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>
@@ -16,11 +17,8 @@
     <InternalsVisibleTo Include="Yarp.ReverseProxy.FunctionalTests" />
   </ItemGroup>
 
-  <ItemGroup Condition="'$(TargetFramework)' == 'netcoreapp3.1'">
-    <Compile Remove="Http/*" />
-    <Compile Remove="Sockets/*" />
-    <Compile Remove="NetSecurity/*" />
-    <Compile Remove="NameResolution/*" />
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\"/>
   </ItemGroup>
 
 </Project>

@@ -2,10 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using k8s.Models;
+using YamlDotNet.Serialization;
 using Yarp.ReverseProxy.Configuration;
 using Yarp.Kubernetes.Controller.Caching;
-using Yarp.Kubernetes.Controller.Services;
-using YamlDotNet.Serialization;
 
 namespace Yarp.Kubernetes.Controller.Converters;
 
@@ -40,8 +39,14 @@ internal static class YarpParser
         foreach (var path in http.Paths ?? Enumerable.Empty<V1HTTPIngressPath>())
         {
             var service = ingressContext.Services.SingleOrDefault(s => s.Metadata.Name == path.Backend.Service.Name);
-            var servicePort = service.Spec.Ports.SingleOrDefault(p => MatchesPort(p, path.Backend.Service.Port));
-            HandleIngressRulePath(ingressContext, servicePort, endpoints, defaultSubsets, rule, path, configContext);
+            if (service.Spec != null)
+            {
+                var servicePort = service.Spec.Ports.SingleOrDefault(p => MatchesPort(p, path.Backend.Service.Port));
+                if (servicePort != null)
+                {
+                    HandleIngressRulePath(ingressContext, servicePort, endpoints, defaultSubsets, rule, path, configContext);
+                }
+            }
         }
     }
 
@@ -78,7 +83,7 @@ internal static class YarpParser
         {
             foreach (var port in subset.Ports ?? Enumerable.Empty<Corev1EndpointPort>())
             {
-                if (!MatchesPort(port, servicePort.TargetPort))
+                if (!MatchesPort(port, servicePort?.TargetPort))
                 {
                     continue;
                 }
@@ -167,7 +172,6 @@ internal static class YarpParser
         }
         if (annotations.TryGetValue("yarp.ingress.kubernetes.io/transforms", out var transforms))
         {
-
             options.Transforms = YamlDeserializer.Deserialize<List<Dictionary<string,string>>>(transforms);
         }
         if (annotations.TryGetValue("yarp.ingress.kubernetes.io/authorization-policy", out var authorizationPolicy))
