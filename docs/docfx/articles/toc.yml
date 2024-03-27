@@ -10,6 +10,8 @@
   href: config-filters.md
 - name: Direct Forwarding
   href: direct-forwarding.md
+- name: Destination Resolvers
+  href: destination-resolvers.md
 - name: HTTP client configuration
   href: http-client-config.md
 - name: HTTPS & TLS
@@ -18,8 +20,14 @@
   href: header-guidelines.md
 - name: Header Routing
   href: header-routing.md
+- name: Query Parameter Routing
+  href: queryparameter-routing.md
 - name: Authentication and Authorization
   href: authn-authz.md
+- name: Rate Limiting
+  href: rate-limiting.md
+- name: Output Caching
+  href: output-caching.md
 - name: Cross-Origin Requests (CORS)
   href: cors.md
 - name: Session Affinity
@@ -38,6 +46,8 @@
   href: grpc.md
 - name: WebSockets and SPDY
   href: websockets.md
+- name: Timeouts
+  href: timeouts.md
 - name: Service Fabric Integration
   href: service-fabric-int.md
 - name: Http.sys Delegation

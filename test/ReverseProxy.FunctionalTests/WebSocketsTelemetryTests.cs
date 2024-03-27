@@ -4,14 +4,18 @@
 #nullable enable
 
 using System;
+using System.Net;
 using System.Net.Http;
 using System.Net.WebSockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
+using Xunit.Abstractions;
 using Yarp.ReverseProxy.Common;
 using Yarp.ReverseProxy.Utilities;
 using Yarp.Telemetry.Consumption;
@@ -21,6 +25,13 @@ namespace Yarp.ReverseProxy;
 
 public class WebSocketsTelemetryTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public WebSocketsTelemetryTests(ITestOutputHelper output)
+    {
+        _output = output;
+    }
+
     [Fact]
     public async Task NoWebSocketsUpgrade_NoTelemetryWritten()
     {
@@ -63,7 +74,7 @@ public class WebSocketsTelemetryTests
                     SendMessagesAndCloseAsync(webSocket, written, messageSize),
                     ReceiveAllMessagesAsync(webSocket));
             },
-            new ManualClock(new TimeSpan(42)));
+            new TestTimeProvider(new TimeSpan(42)));
 
         Assert.NotNull(telemetry);
         Assert.Equal(42, telemetry!.EstablishedTime.Ticks);
@@ -71,6 +82,44 @@ public class WebSocketsTelemetryTests
         Assert.Equal(read, telemetry!.MessagesRead);
         Assert.Equal(written, telemetry.MessagesWritten);
     }
+
+#if NET7_0_OR_GREATER
+    [Fact]
+    public async Task Http2WebSocketsWork()
+    {
+        var read = 11;
+        var written = 13;
+        var messageSize = 100;
+        var telemetry = await TestAsync(
+            async uri =>
+            {
+                using var invoker = CreateInvoker();
+                using var client = new ClientWebSocket();
+                client.Options.HttpVersion = HttpVersion.Version20;
+                client.Options.HttpVersionPolicy = HttpVersionPolicy.RequestVersionExact;
+                await client.ConnectAsync(uri, invoker, CancellationToken.None);
+                var webSocket = new WebSocketAdapter(client);
+
+                await Task.WhenAll(
+                    SendMessagesAndCloseAsync(webSocket, read, messageSize),
+                    ReceiveAllMessagesAsync(webSocket));
+            },
+            async (context, webSocket) =>
+            {
+                await Task.WhenAll(
+                    SendMessagesAndCloseAsync(webSocket, written, messageSize),
+                    ReceiveAllMessagesAsync(webSocket));
+            },
+            new TestTimeProvider(new TimeSpan(42)),
+            http2Proxy: true);
+
+        Assert.NotNull(telemetry);
+        Assert.Equal(42, telemetry!.EstablishedTime.Ticks);
+        Assert.Contains(telemetry.CloseReason, new[] { WebSocketCloseReason.ClientGracefulClose, WebSocketCloseReason.ServerGracefulClose });
+        Assert.Equal(read, telemetry!.MessagesRead);
+        Assert.Equal(written, telemetry.MessagesWritten);
+    }
+#endif
 
     public enum Behavior
     {
@@ -111,6 +160,8 @@ public class WebSocketsTelemetryTests
     [InlineData(Behavior.SendsClose_ClosesConnection, Behavior.SendsClose_ClosesConnection, WebSocketCloseReason.ClientGracefulClose, WebSocketCloseReason.ServerGracefulClose)]
     public async Task ConnectionClosed_BlameAttributedCorrectly(Behavior clientBehavior, Behavior serverBehavior, params WebSocketCloseReason[] expectedReasons)
     {
+        var serverSawClose = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
         var telemetry = await TestAsync(
             async uri =>
             {
@@ -126,8 +177,10 @@ public class WebSocketsTelemetryTests
                 {
                     await ProcessAsync(webSocket, clientBehavior, client: client);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _output.WriteLine($"Ignored client exception: {ex}");
+
                     Assert.True(serverBehavior.HasFlag(Behavior.ClosesConnection));
                 }
             },
@@ -137,8 +190,10 @@ public class WebSocketsTelemetryTests
                 {
                     await ProcessAsync(webSocket, serverBehavior, context: context);
                 }
-                catch
+                catch (Exception ex)
                 {
+                    _output.WriteLine($"Ignored destination exception: {ex}");
+
                     Assert.True(clientBehavior.HasFlag(Behavior.ClosesConnection));
                 }
             });
@@ -146,7 +201,7 @@ public class WebSocketsTelemetryTests
         Assert.NotNull(telemetry);
         Assert.Contains(telemetry!.CloseReason, expectedReasons);
 
-        static async Task ProcessAsync(WebSocketAdapter webSocket, Behavior behavior, ClientWebSocket? client = null, HttpContext? context = null)
+        async Task ProcessAsync(WebSocketAdapter webSocket, Behavior behavior, ClientWebSocket? client = null, HttpContext? context = null)
         {
             if (behavior == Behavior.SendsClose_WaitsForClose ||
                 behavior == Behavior.SendsClose_ClosesConnection)
@@ -159,6 +214,11 @@ public class WebSocketsTelemetryTests
                 behavior == Behavior.WaitsForClose_ClosesConnection)
             {
                 await ReceiveAllMessagesAsync(webSocket);
+
+                if (context is not null)
+                {
+                    serverSawClose.SetResult();
+                }
             }
 
             if (behavior == Behavior.WaitsForClose_SendsClose)
@@ -168,6 +228,14 @@ public class WebSocketsTelemetryTests
 
             if (behavior.HasFlag(Behavior.ClosesConnection))
             {
+                if (client is not null &&
+                    behavior is Behavior.SendsClose_ClosesConnection &&
+                    serverBehavior is Behavior.WaitsForClose_SendsClose or Behavior.WaitsForClose_ClosesConnection)
+                {
+                    // If we're sending a close message and expect the server to receive it, wait before killing the connection.
+                    await serverSawClose.Task.WaitAsync(TimeSpan.FromMinutes(1));
+                }
+
                 client?.Abort();
 
                 if (context is not null)
@@ -185,7 +253,7 @@ public class WebSocketsTelemetryTests
     [InlineData(100, 100, WebSocketCloseReason.ServerGracefulClose)] // Implementation detail
     public async Task ConnectionClosed_BlameReliesOnCloseTimes(long clientCloseTime, long serverCloseTime, WebSocketCloseReason expectedCloseReason)
     {
-        var clock = new ManualClock(new TimeSpan(1));
+        var timeProvider = new TestTimeProvider(new TimeSpan(1));
 
         var telemetry = await TestAsync(
             async uri =>
@@ -194,20 +262,22 @@ public class WebSocketsTelemetryTests
                 await client.ConnectAsync(uri, CancellationToken.None);
                 var webSocket = new WebSocketAdapter(client);
 
-                await ProcessAsync(webSocket, clock, clientCloseTime, sendCloseFirst: clientCloseTime <= serverCloseTime);
+                await ProcessAsync(webSocket, timeProvider, clientCloseTime, sendCloseFirst: clientCloseTime <= serverCloseTime);
             },
             async (context, webSocket) =>
             {
-                await ProcessAsync(webSocket, clock, serverCloseTime, sendCloseFirst: serverCloseTime < clientCloseTime);
+                await ProcessAsync(webSocket, timeProvider, serverCloseTime, sendCloseFirst: serverCloseTime < clientCloseTime);
             },
-            clock);
+            timeProvider);
 
         Assert.NotNull(telemetry);
         Assert.Equal(1, telemetry!.EstablishedTime.Ticks);
         Assert.Equal(expectedCloseReason, telemetry.CloseReason);
 
-        static async Task ProcessAsync(WebSocketAdapter webSocket, ManualClock clock, long closeTime, bool sendCloseFirst)
+        static async Task ProcessAsync(WebSocketAdapter webSocket, TestTimeProvider timeProvider, long closeTime, bool sendCloseFirst)
         {
+            await SendAndAcknowledgeMessageAsync(webSocket);
+
             var receiveTask = ReceiveAllMessagesAsync(webSocket);
 
             if (!sendCloseFirst)
@@ -215,15 +285,27 @@ public class WebSocketsTelemetryTests
                 await receiveTask;
             }
 
-            lock (clock)
+            lock (timeProvider)
             {
-                clock.AdvanceClockTo(TimeSpan.FromTicks(closeTime));
+                timeProvider.AdvanceTo(TimeSpan.FromTicks(closeTime));
             }
 
             await webSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Bye", CancellationToken.None);
 
             await receiveTask;
         }
+    }
+
+    private static async Task SendAndAcknowledgeMessageAsync(WebSocketAdapter webSocket)
+    {
+        var receiveBuffer = new byte[10];
+
+        var sendTask = webSocket.SendAsync("Hello"u8.ToArray(), WebSocketMessageType.Text, endOfMessage: true).AsTask();
+        var receiveTask = webSocket.ReceiveAsync(receiveBuffer).AsTask();
+
+        await Task.WhenAll(sendTask, receiveTask);
+
+        Assert.Equal("Hello", Encoding.UTF8.GetString(receiveBuffer[..(await receiveTask).Count]));
     }
 
     private static async Task ReceiveAllMessagesAsync(WebSocketAdapter webSocket)
@@ -299,13 +381,13 @@ public class WebSocketsTelemetryTests
         }
     }
 
-    private static async Task<WebSocketsTelemetry?> TestAsync(Func<Uri, Task> requestDelegate, Func<HttpContext, WebSocketAdapter, Task> destinationDelegate, IClock? clock = null)
+    private static async Task<WebSocketsTelemetry?> TestAsync(Func<Uri, Task> requestDelegate, Func<HttpContext, WebSocketAdapter, Task> destinationDelegate, TimeProvider? timeProvider = null, bool http2Proxy = false)
     {
         var telemetryConsumer = new TelemetryConsumer();
 
-        var test = new TestEnvironment(
-            destinationServies => { },
-            destinationApp =>
+        var test = new TestEnvironment()
+        {
+            ConfigureDestinationApp = destinationApp =>
             {
                 destinationApp.UseWebSockets();
 
@@ -319,21 +401,27 @@ public class WebSocketsTelemetryTests
                     }
                 });
             },
-            proxyServices =>
+            ConfigureProxyServices = proxyServices =>
             {
-                if (clock is not null)
+                if (timeProvider is not null)
                 {
-                    proxyServices.AddSingleton(clock);
+                    proxyServices.AddSingleton(timeProvider);
                 }
             },
-            proxyBuilder =>
+            ConfigureProxy = proxyBuilder =>
             {
                 proxyBuilder.Services.AddTelemetryConsumer(telemetryConsumer);
             },
-            proxyApp =>
+            ConfigureProxyApp = proxyApp =>
             {
                 proxyApp.UseWebSocketsTelemetry();
-            });
+            },
+        };
+
+        if (http2Proxy)
+        {
+            test.ProxyProtocol = HttpProtocols.Http2;
+        }
 
         await test.Invoke(async uri =>
         {
@@ -357,4 +445,19 @@ public class WebSocketsTelemetryTests
             Telemetry = new WebSocketsTelemetry(timestamp, establishedTime, closeReason, messagesRead, messagesWritten);
         }
     }
+
+#if NET7_0_OR_GREATER
+    private static HttpMessageInvoker CreateInvoker()
+    {
+        var handler = new SocketsHttpHandler
+        {
+            AllowAutoRedirect = false,
+            AutomaticDecompression = DecompressionMethods.None,
+            UseCookies = false,
+            UseProxy = false
+        };
+        handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
+        return new HttpMessageInvoker(handler);
+    }
+#endif
 }

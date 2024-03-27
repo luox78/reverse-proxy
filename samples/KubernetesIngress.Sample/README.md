@@ -42,8 +42,32 @@ metadata:
   namespace: default
   annotations:
     yarp.ingress.kubernetes.io/authorization-policy: authzpolicy
+    yarp.ingress.kubernetes.io/rate-limiter-policy: ratelimiterpolicy
+    yarp.ingress.kubernetes.io/output-cache-policy: outputcachepolicy
     yarp.ingress.kubernetes.io/transforms: |
       - PathRemovePrefix: "/apis"
+    yarp.ingress.kubernetes.io/route-headers: |
+      - Name: the-header-key
+        Values:
+        - the-header-value
+        Mode: Contains
+        IsCaseSensitive: false
+      - Name: another-header-key
+        Values:
+        - another-header-value
+        Mode: Contains
+        IsCaseSensitive: false
+    yarp.ingress.kubernetes.io/route-queryparameters: |
+      - Name: the-queryparameters-key
+        Values:
+        - the-queryparameters-value
+        Mode: Contains
+        IsCaseSensitive: false
+      - Name: another-queryparameters-key
+        Values:
+        - another-queryparameters-value
+        Mode: Contains
+        IsCaseSensitive: false
 spec:
   rules:
     - http:
@@ -62,6 +86,8 @@ The table below lists the available annotations.
 |Annotation|Data Type|
 |---|---|
 |yarp.ingress.kubernetes.io/authorization-policy|string|
+|yarp.ingress.kubernetes.io/rate-limiter-policy|string|
+|yarp.ingress.kubernetes.io/output-cache-policy|string|
 |yarp.ingress.kubernetes.io/backend-protocol|string|
 |yarp.ingress.kubernetes.io/cors-policy|string|
 |yarp.ingress.kubernetes.io/health-check|[ActivateHealthCheckConfig](https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.ActiveHealthCheckConfig.html)|
@@ -70,6 +96,9 @@ The table below lists the available annotations.
 |yarp.ingress.kubernetes.io/route-metadata|Dictionary<string, string>|
 |yarp.ingress.kubernetes.io/session-affinity|[SessionAffinityConfig](https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.SessionAffinityConfig.html)|
 |yarp.ingress.kubernetes.io/transforms|List<Dictionary<string, string>>|
+|yarp.ingress.kubernetes.io/route-headers|List<[RouteHeader](https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.RouteHeader.html)>|
+|yarp.ingress.kubernetes.io/route-queryparameters|List<[RouteQueryParameter](https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.RouteQueryParameter.html)>|
+|yarp.ingress.kubernetes.io/route-order|int|
 
 #### Authorization Policy
 
@@ -77,11 +106,21 @@ See https://microsoft.github.io/reverse-proxy/articles/authn-authz.html for a li
 
 `yarp.ingress.kubernetes.io/authorization-policy: anonymous`
 
+#### RateLimiter Policy
+
+See https://microsoft.github.io/reverse-proxy/articles/rate-limiting.html for a list of available policies, or how to add your own custom policies.
+
+`yarp.ingress.kubernetes.io/rate-limiter-policy: mypolicy`
+
+#### Output Cache Policy
+
+`yarp.ingress.kubernetes.io/output-cache-policy: mycachepolicy`
+
 #### Backend Protocol
 
 Specifies the protocol of the backend service. Defaults to http.
 
-`yarp.ingress.kubernetes.io/authorization-policy: "https"`
+`yarp.ingress.kubernetes.io/backend-protocol: "https"`
 
 #### CORS Policy
 
@@ -130,8 +169,8 @@ See https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuratio
 
 ```
 yarp.ingress.kubernetes.io/route-metadata: |
-  - Custom: "orange"
-  - Tenant: "12345"
+  Custom: "orange"
+  Tenant: "12345"
 ```
 
 #### Session Affinity
@@ -164,4 +203,52 @@ yarp.ingress.kubernetes.io/transforms: |
   - PathPrefix: "/apis"
   - RequestHeader: header1
     Append: bar
+```
+
+#### Route Headers
+
+`route-headers` are the YAML representation of YARP [Header Based Routing](https://microsoft.github.io/reverse-proxy/articles/header-routing.html).
+
+See https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.RouteHeader.html.
+
+```
+yarp.ingress.kubernetes.io/route-headers: |
+  - Name: the-header-key
+    Values:
+    - the-header-value
+    Mode: Contains
+    IsCaseSensitive: false
+  - Name: another-header-key
+    Values:
+    - another-header-value
+    Mode: Contains
+    IsCaseSensitive: false
+```
+
+#### Route QueryParameters
+
+`route-queryparameters` are the YAML representation of YARP [Parameter Based Routing](https://microsoft.github.io/reverse-proxy/articles/queryparameter-routing.html).
+
+See https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.RouteQueryParameter.html.
+
+```
+yarp.ingress.kubernetes.io/route-queryparameters: |
+  - Name: the-queryparameter-name
+    Values:
+    - the-queryparameter-value
+    Mode: Contains
+    IsCaseSensitive: false
+  - Name: another-queryparameter-name
+    Values:
+    - another-queryparameter-value
+    Mode: Contains
+    IsCaseSensitive: false
+```
+
+#### Route Order
+
+See https://microsoft.github.io/reverse-proxy/api/Yarp.ReverseProxy.Configuration.RouteConfig.html#Yarp_ReverseProxy_Configuration_RouteConfig_Order.
+
+```
+yarp.ingress.kubernetes.io/route-order: '10'
 ```

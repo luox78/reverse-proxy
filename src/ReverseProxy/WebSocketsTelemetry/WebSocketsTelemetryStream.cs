@@ -19,12 +19,12 @@ internal sealed class WebSocketsTelemetryStream : DelegatingStream
     public long MessagesRead => _readParser.MessageCount;
     public long MessagesWritten => _writeParser.MessageCount;
 
-    public WebSocketsTelemetryStream(IClock clock, Stream innerStream)
+    public WebSocketsTelemetryStream(TimeProvider timeProvider, Stream innerStream)
         : base(innerStream)
     {
-        EstablishedTime = clock.GetUtcNow().UtcDateTime;
-        _readParser = new WebSocketsParser(clock, isServer: true);
-        _writeParser = new WebSocketsParser(clock, isServer: false);
+        EstablishedTime = timeProvider.GetUtcNow().UtcDateTime;
+        _readParser = new WebSocketsParser(timeProvider, isServer: true);
+        _writeParser = new WebSocketsParser(timeProvider, isServer: false);
     }
 
     public WebSocketCloseReason GetCloseReason(HttpContext context)
@@ -39,7 +39,7 @@ internal sealed class WebSocketsTelemetryStream : DelegatingStream
         }
 
         // One side sent a WebSocket close, but we never saw a response from the other side
-        // It is possible an error occurred, but we saw a graceful close first, so that is the intiator
+        // It is possible an error occurred, but we saw a graceful close first, so that is the initiator
         if (clientCloseTime.HasValue)
         {
             return WebSocketCloseReason.ClientGracefulClose;
@@ -59,9 +59,12 @@ internal sealed class WebSocketsTelemetryStream : DelegatingStream
             ForwarderError.UpgradeRequestDestination => WebSocketCloseReason.ServerDisconnect,
             ForwarderError.UpgradeResponseDestination => WebSocketCloseReason.ServerDisconnect,
 
-            // Both sides gracefully closed the underlying connection without sending a WebSocket close
-            // Neither side is doing what we recognize as WebSockets ¯\_(ツ)_/¯
-            null => WebSocketCloseReason.Unknown,
+            // Activity Timeout
+            ForwarderError.UpgradeActivityTimeout => WebSocketCloseReason.ActivityTimeout,
+
+            // Both sides gracefully closed the underlying connection without sending a WebSocket close,
+            // or the server closed the connection and we canceled the client and suppressed the errors.
+            null => WebSocketCloseReason.ServerDisconnect,
 
             // We are not expecting any other error from HttpForwarder after a successful connection upgrade
             // Technically, a user could overwrite the IForwarderErrorFeature, in which case we don't know what's going on

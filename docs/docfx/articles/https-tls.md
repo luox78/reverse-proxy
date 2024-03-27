@@ -10,7 +10,7 @@ YARP is a level 7 HTTP proxy which means that incoming HTTPS/TLS connections are
 
 TLS tunneling using the CONNECT method is a feature used to proxy requests without decrypting them. This is _not_ supported by YARP and there are no plans to add it.
 
-## Configuring incomming connections
+## Configuring incoming connections
 
 YARP can run on top of all ASP.NET Core servers and configuring HTTPS/TLS for incoming connections is server specific. Check the docs for [Kestrel](https://docs.microsoft.com/aspnet/core/fundamentals/servers/kestrel/endpoints#listenoptionsusehttps), [IIS](https://docs.microsoft.com/iis/manage/configuring-security/how-to-set-up-ssl-on-iis), and [Http.Sys](https://docs.microsoft.com/aspnet/core/fundamentals/servers/httpsys#configure-windows-server-1) for configuration details.
 
@@ -22,7 +22,7 @@ Kestrel supports intercepting incoming connections before the TLS handshake. YAR
 
 To enable TLS encryption when communicating with a destination specify the destination address as `https` like `"https://destinationHost"`. See the [configuration docs](config-files.md#configuration-structure) for examples.
 
-The host name specified in the destination address will be used for the TLS handshake by default, including SNI and server certificate validation. If proxying the [original host header](transforms.md#requestheaderoriginalhost) is enabled, that value will be used for the TLS handshake instead. If a custom host value needs to be used then use the [RequestHeader](transforms.html#requestheader) transform to set the host header.
+The host name specified in the destination address will be used for the TLS handshake by default, including SNI and server certificate validation. If proxying the [original host header](transforms.md#requestheaderoriginalhost) is enabled, that value will be used for the TLS handshake instead. If a custom host value needs to be used then use the [RequestHeader](transforms.md#requestheader) transform to set the host header.
 
 Outbound connections to the destinations are handled by HttpClient/SocketsHttpHandler. A different instance and settings can be configured per cluster. Some settings are available in the configuration model, while others can only be configured in code. See the [HttpClient](http-client-config.md) docs for details.
 

@@ -19,12 +19,11 @@ NETStandard.Library |  MIT
 ## Yarp.Kubernetes.Ingress
 | Package | License |
 | :--- | :--- |
-Nerdbank.GitVersioning |  MIT
 Serilog.Extensions.Logging |  Apache-2.0
 Serilog.Formatting.Compact |  Apache-2.0
 Serilog.Sinks.Console |  Apache-2.0
 
-## ReverseProxy.Metrics.Promethius.Sample
+## ReverseProxy.Metrics.Prometheus.Sample
 | Package | License |
 | :--- | :--- |
 prometheus-net |  MIT
@@ -75,7 +74,6 @@ Microsoft.CodeAnalysis.FxCopAnalyzers |  [Microsoft .NET Library](https://dotnet
 | Package | License |
 | :--- | :--- |
 Microsoft.VisualStudio.Azure.Containers.Tools.Targets |  [Microsoft .Net Library](https://www.microsoft.com/web/webpi/eula/net_library_eula_ENU.htm)
-Nerdbank.GitVersioning |  MIT
 Serilog.Extensions.Logging |  Apache-2.0
 Serilog.Formatting.Compact |  Apache-2.0
 Serilog.Sinks.Console |  Apache-2.0

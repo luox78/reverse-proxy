@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.Extensions.Primitives;
 using Xunit;
+using Yarp.Tests.Common;
 
 namespace Yarp.ReverseProxy.Transforms.Tests;
 
@@ -19,7 +20,7 @@ public class ResponseTrailersTransformTests
         var httpContext = new DefaultHttpContext();
         var trailerFeature = new TestTrailersFeature();
         httpContext.Features.Set<IHttpResponseTrailersFeature>(trailerFeature);
-        trailerFeature.Trailers.Add("name", "value0");
+        trailerFeature.Trailers["name"] = "value0";
         var proxyResponse = new HttpResponseMessage();
         proxyResponse.TrailingHeaders.Add("Name", "value1");
         var result = ResponseTrailersTransform.TakeHeader(new ResponseTrailersTransformContext()
@@ -69,10 +70,5 @@ public class ResponseTrailersTransformTests
         Assert.Equal(StringValues.Empty, result);
         Assert.False(trailerFeature.Trailers.TryGetValue("name", out var _));
         Assert.Equal(new[] { "value1" }, proxyResponse.TrailingHeaders.GetValues("name"));
-    }
-
-    private class TestTrailersFeature : IHttpResponseTrailersFeature
-    {
-        public IHeaderDictionary Trailers { get; set; } = new HeaderDictionary();
     }
 }

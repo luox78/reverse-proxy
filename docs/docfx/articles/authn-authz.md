@@ -38,33 +38,22 @@ Example:
 
 [Authorization policies](https://docs.microsoft.com/aspnet/core/security/authorization/policies) are an ASP.NET Core concept that the proxy utilizes. The proxy provides the above configuration to specify a policy per route and the rest is handled by existing ASP.NET Core authentication and authorization components.
 
-Authorization policies can be configured in Startup.ConfigureServices as follows:
+Authorization policies can be configured in the application as follows:
 ```
-public void ConfigureServices(IServiceCollection services)
+services.AddAuthorization(options =>
 {
-    services.AddAuthorization(options =>
-    {
-        options.AddPolicy("customPolicy", policy =>
-            policy.RequireAuthenticatedUser());
-    });
-}
+    options.AddPolicy("customPolicy", policy =>
+        policy.RequireAuthenticatedUser());
+});
 ```
 
-In Startup.Configure add the Authorization and Authentication middleware between Routing and Endpoints.
+In Program.cs add the Authorization and Authentication middleware.
 
 ```
-public void Configure(IApplicationBuilder app)
-{
-    app.UseRouting();
+app.UseAuthentication();
+app.UseAuthorization();
 
-    app.UseAuthentication();
-    app.UseAuthorization();
-
-    app.UseEndpoints(endpoints =>
-    {
-        endpoints.MapReverseProxy();
-    });
-}
+app.MapReverseProxy();
 ```
 
 See the [Authentication](https://docs.microsoft.com/aspnet/core/security/authentication/) docs for setting up your preferred kind of authentication.
@@ -97,7 +86,7 @@ These authentication types already pass their values in the request headers and 
 
 These protocols are commonly used with remote identity providers. The authentication process can be configured in the proxy application and will result in an authentication cookie. That cookie will flow to the destination server as a normal request header.
 
-### Windows, Negotiate, NTLM, Kerbereos
+### Windows, Negotiate, NTLM, Kerberos
 
 These authentication types are often bound to a specific connection. They are not supported as means of authenticating a user in a destination server behind the YARP proxy (see [#166](https://github.com/microsoft/reverse-proxy/issues/166). They can be used to authenticate an incoming request to the proxy, but that identity information will have to be communicated to the destination server in another form. They can also be used to authenticate the proxy to the destination servers, but only as the proxy's own user, impersonating the client is not supported.
 

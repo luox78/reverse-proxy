@@ -2,25 +2,21 @@
 // Licensed under the MIT License.
 
 using System;
-using System.Diagnostics;
-using System.IO;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
-using Microsoft.Net.Http.Headers;
-using Yarp.ReverseProxy.Utilities;
 
 namespace Yarp.ReverseProxy.WebSocketsTelemetry;
 
 internal sealed class WebSocketsTelemetryMiddleware
 {
     private readonly RequestDelegate _next;
-    private readonly IClock _clock;
+    private readonly TimeProvider _timeProvider;
 
-    public WebSocketsTelemetryMiddleware(RequestDelegate next, IClock clock)
+    public WebSocketsTelemetryMiddleware(RequestDelegate next, TimeProvider timeProvider)
     {
         _next = next ?? throw new ArgumentNullException(nameof(next));
-        _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
 
     public Task InvokeAsync(HttpContext context)
@@ -29,9 +25,17 @@ internal sealed class WebSocketsTelemetryMiddleware
         {
             if (context.Features.Get<IHttpUpgradeFeature>() is { IsUpgradableRequest: true } upgradeFeature)
             {
-                var upgradeWrapper = new HttpUpgradeFeatureWrapper(_clock, context, upgradeFeature);
+                var upgradeWrapper = new HttpUpgradeFeatureWrapper(_timeProvider, context, upgradeFeature);
                 return InvokeAsyncCore(upgradeWrapper, _next);
             }
+#if NET7_0_OR_GREATER
+            else if (context.Features.Get<IHttpExtendedConnectFeature>() is { IsExtendedConnect: true } connectFeature
+                && string.Equals("websocket", connectFeature.Protocol, StringComparison.OrdinalIgnoreCase))
+            {
+                var connectWrapper = new HttpConnectFeatureWrapper(_timeProvider, context, connectFeature);
+                return InvokeAsyncCore(connectWrapper, _next);
+            }
+#endif
         }
 
         return _next(context);
@@ -60,38 +64,28 @@ internal sealed class WebSocketsTelemetryMiddleware
         }
     }
 
-    private sealed class HttpUpgradeFeatureWrapper : IHttpUpgradeFeature
+#if NET7_0_OR_GREATER
+    private static async Task InvokeAsyncCore(HttpConnectFeatureWrapper connectWrapper, RequestDelegate next)
     {
-        private readonly IClock _clock;
+        connectWrapper.HttpContext.Features.Set<IHttpExtendedConnectFeature>(connectWrapper);
 
-        public HttpContext HttpContext { get; private set; }
-
-        public IHttpUpgradeFeature InnerUpgradeFeature { get; private set; }
-
-        public WebSocketsTelemetryStream? TelemetryStream { get; private set; }
-
-        public bool IsUpgradableRequest => InnerUpgradeFeature.IsUpgradableRequest;
-
-        public HttpUpgradeFeatureWrapper(IClock clock, HttpContext httpContext, IHttpUpgradeFeature upgradeFeature)
+        try
         {
-            _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-            HttpContext = httpContext ?? throw new ArgumentNullException(nameof(httpContext));
-            InnerUpgradeFeature = upgradeFeature ?? throw new ArgumentNullException(nameof(upgradeFeature));
+            await next(connectWrapper.HttpContext);
         }
-
-        public async Task<Stream> UpgradeAsync()
+        finally
         {
-            Debug.Assert(TelemetryStream is null);
-            var opaqueTransport = await InnerUpgradeFeature.UpgradeAsync();
-
-            if (HttpContext.Response.Headers.TryGetValue(HeaderNames.Upgrade, out var upgradeValues) &&
-                upgradeValues.Count == 1 &&
-                string.Equals("WebSocket", upgradeValues.ToString(), StringComparison.OrdinalIgnoreCase))
+            if (connectWrapper.TelemetryStream is { } telemetryStream)
             {
-                TelemetryStream = new WebSocketsTelemetryStream(_clock, opaqueTransport);
+                WebSocketsTelemetry.Log.WebSocketClosed(
+                    telemetryStream.EstablishedTime.Ticks,
+                    telemetryStream.GetCloseReason(connectWrapper.HttpContext),
+                    telemetryStream.MessagesRead,
+                    telemetryStream.MessagesWritten);
             }
 
-            return TelemetryStream ?? opaqueTransport;
+            connectWrapper.HttpContext.Features.Set(connectWrapper.InnerConnectFeature);
         }
     }
+#endif
 }

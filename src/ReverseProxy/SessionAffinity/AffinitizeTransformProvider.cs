@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using Yarp.ReverseProxy.Transforms.Builder;
 using Yarp.ReverseProxy.Utilities;
@@ -10,7 +11,7 @@ namespace Yarp.ReverseProxy.SessionAffinity;
 
 internal sealed class AffinitizeTransformProvider : ITransformProvider
 {
-    private readonly IDictionary<string, ISessionAffinityPolicy> _sessionAffinityPolicies;
+    private readonly FrozenDictionary<string, ISessionAffinityPolicy> _sessionAffinityPolicies;
 
     public AffinitizeTransformProvider(IEnumerable<ISessionAffinityPolicy> sessionAffinityPolicies)
     {
@@ -34,7 +35,7 @@ internal sealed class AffinitizeTransformProvider : ITransformProvider
         if (string.IsNullOrEmpty(policy))
         {
             // The default.
-            policy = SessionAffinityConstants.Policies.Cookie;
+            policy = SessionAffinityConstants.Policies.HashCookie;
         }
 
         if (!_sessionAffinityPolicies.ContainsKey(policy))
@@ -49,7 +50,7 @@ internal sealed class AffinitizeTransformProvider : ITransformProvider
 
         if (options is not null && options.Enabled.GetValueOrDefault())
         {
-            var policy = _sessionAffinityPolicies.GetRequiredServiceById(options.Policy, SessionAffinityConstants.Policies.Cookie);
+            var policy = _sessionAffinityPolicies.GetRequiredServiceById(options.Policy, SessionAffinityConstants.Policies.HashCookie);
             context.ResponseTransforms.Add(new AffinitizeTransform(policy));
         }
     }

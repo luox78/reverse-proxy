@@ -14,6 +14,8 @@ If you want to download the latest daily build and use it in a project, then you
       <packageSources>
           <clear />
           <add key=".NET Libraries Daily" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-libraries/nuget/v3/index.json" />
+          <!-- The .NET Libraries Transport Daily feed is only needed for the Yarp.Kubernetes.Controller package -->
+          <add key=".NET Libraries Transport Daily" value="https://pkgs.dev.azure.com/dnceng/public/_packaging/dotnet-libraries-transport/nuget/v3/index.json" />
           <add key="NuGet.org" value="https://api.nuget.org/v3/index.json" />
       </packageSources>
   </configuration>
@@ -21,7 +23,7 @@ If you want to download the latest daily build and use it in a project, then you
 
   *NOTE: This NuGet.Config should be with your application unless you want nightly packages to potentially start being restored for other apps on the machine.*
 
-Then follow the [Getting Started](https://microsoft.github.io/reverse-proxy/articles/getting_started.html) guide to set up a project and add the nuget package dependency. Note daily builds use a higher preview version than given in the docs.
+Then follow the [Getting Started](https://microsoft.github.io/reverse-proxy/articles/getting-started.html) guide to set up a project and add the nuget package dependency. Note daily builds use a higher preview version than given in the docs.
 
 Some features, such as new target frameworks, may require prerelease tooling builds for Visual Studio.
 These are available in the [Visual Studio Preview](https://www.visualstudio.com/vs/preview/).

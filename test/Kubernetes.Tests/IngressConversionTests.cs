@@ -21,6 +21,7 @@ using Newtonsoft.Json.Linq;
 using Xunit;
 using Yarp.Kubernetes.Controller;
 using Yarp.Kubernetes.Controller.Caching;
+using Yarp.Kubernetes.Controller.Certificates;
 using Yarp.Kubernetes.Controller.Converters;
 using JsonSerializer = System.Text.Json.JsonSerializer;
 
@@ -45,15 +46,21 @@ public class IngressConversionTests
     [InlineData("mapped-port")]
     [InlineData("port-mismatch")]
     [InlineData("hostname-routing")]
+    [InlineData("multiple-hosts")]
     [InlineData("multiple-ingresses")]
     [InlineData("multiple-ingresses-one-svc")]
     [InlineData("multiple-namespaces")]
     [InlineData("route-metadata")]
+    [InlineData("route-queryparameters")]
+    [InlineData("route-headers")]
+    [InlineData("route-order")]
     [InlineData("missing-svc")]
+    [InlineData("port-diff-name")]
+    [InlineData("external-name-ingress")]
     public async Task ParsingTests(string name)
     {
         var ingressClass = KubeResourceGenerator.CreateIngressClass("yarp", "microsoft.com/ingress-yarp", true);
-        var cache = await GetKubernetesInfo(name, ingressClass).ConfigureAwait(false);
+        var cache = await GetKubernetesInfo(name, ingressClass);
         var configContext = new YarpConfigContext();
         var ingresses = cache.GetIngresses().ToArray();
 
@@ -77,7 +84,12 @@ public class IngressConversionTests
 
     private static void VerifyRoutes(string routesJson, string name)
     {
+#if NET7_0_OR_GREATER
         VerifyJson(routesJson, name, "routes.json");
+#else
+        VerifyJson(routesJson, name,
+            string.Equals("annotations", name, StringComparison.OrdinalIgnoreCase) ? "routes.net6.json" : "routes.json");
+#endif
     }
 
     private static string StripNullProperties(string json)
@@ -120,10 +132,13 @@ public class IngressConversionTests
     {
         var mockLogger = new Mock<ILogger<IngressCache>>();
         var mockOptions = new Mock<IOptions<YarpOptions>>();
+        var certificateSelector = new Mock<IServerCertificateSelector>();
+        var loggerHelper = new Mock<ILogger<CertificateHelper>>();
+        var certificateHelper = new CertificateHelper(loggerHelper.Object);
 
         mockOptions.SetupGet(o => o.Value).Returns(new YarpOptions { ControllerClass = "microsoft.com/ingress-yarp" });
 
-        var cache = new IngressCache(mockOptions.Object, mockLogger.Object);
+        var cache = new IngressCache(mockOptions.Object, certificateSelector.Object, certificateHelper, mockLogger.Object);
 
         var typeMap = new Dictionary<string, Type>();
         typeMap.Add("networking.k8s.io/v1/Ingress", typeof(V1Ingress));
@@ -135,7 +150,7 @@ public class IngressConversionTests
             cache.Update(WatchEventType.Added, ingressClass);
         }
 
-        var kubeObjects = await Yaml.LoadAllFromFileAsync(Path.Combine("testassets", name, "ingress.yaml"), typeMap).ConfigureAwait(false);
+        var kubeObjects = await KubernetesYaml.LoadAllFromFileAsync(Path.Combine("testassets", name, "ingress.yaml"), typeMap).ConfigureAwait(false);
         foreach (var obj in kubeObjects)
         {
             if (obj is V1Ingress ingress)

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 using System;
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Yarp.Telemetry.Consumption;
 
@@ -86,7 +87,7 @@ public static class TelemetryConsumptionExtensions
     /// <summary>
     /// Registers a <typeparamref name="TConsumer"/> singleton for every I*TelemetryConsumer interface it implements.
     /// </summary>
-    public static IServiceCollection AddTelemetryConsumer<TConsumer>(this IServiceCollection services)
+    public static IServiceCollection AddTelemetryConsumer<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TConsumer>(this IServiceCollection services)
         where TConsumer : class
     {
         var implementsAny = false;
@@ -136,6 +137,115 @@ public static class TelemetryConsumptionExtensions
         if (!implementsAny)
         {
             throw new ArgumentException("TConsumer must implement at least one I*TelemetryConsumer interface.", nameof(TConsumer));
+        }
+
+        services.TryAddSingleton<TConsumer>();
+
+        services.AddTelemetryListeners();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers a consumer singleton for every IMetricsConsumer interface it implements.
+    /// </summary>
+    public static IServiceCollection AddMetricsConsumer(this IServiceCollection services, object consumer)
+    {
+        var implementsAny = false;
+
+        if (consumer is IMetricsConsumer<ForwarderMetrics> forwarderMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(forwarderMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (consumer is IMetricsConsumer<KestrelMetrics> kestrelMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(kestrelMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (consumer is IMetricsConsumer<HttpMetrics> httpMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(httpMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (consumer is IMetricsConsumer<NameResolutionMetrics> nameResolutionMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(nameResolutionMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (consumer is IMetricsConsumer<NetSecurityMetrics> netSecurityMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(netSecurityMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (consumer is IMetricsConsumer<SocketsMetrics> socketsMetricsConsumer)
+        {
+            services.TryAddEnumerable(ServiceDescriptor.Singleton(socketsMetricsConsumer));
+            implementsAny = true;
+        }
+
+        if (!implementsAny)
+        {
+            throw new ArgumentException("The consumer must implement at least one IMetricsConsumer interface.", nameof(consumer));
+        }
+
+        services.AddTelemetryListeners();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Registers a consumer singleton for every IMetricsConsumer interface it implements.
+    /// </summary>
+    public static IServiceCollection AddMetricsConsumer<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TConsumer>(this IServiceCollection services)
+        where TConsumer : class
+    {
+        var implementsAny = false;
+
+        if (typeof(IMetricsConsumer<ForwarderMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<ForwarderMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (typeof(IMetricsConsumer<KestrelMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<KestrelMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (typeof(IMetricsConsumer<HttpMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<HttpMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (typeof(IMetricsConsumer<NameResolutionMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<NameResolutionMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (typeof(IMetricsConsumer<NetSecurityMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<NetSecurityMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (typeof(IMetricsConsumer<SocketsMetrics>).IsAssignableFrom(typeof(TConsumer)))
+        {
+            services.AddSingleton(services => (IMetricsConsumer<SocketsMetrics>)services.GetRequiredService<TConsumer>());
+            implementsAny = true;
+        }
+
+        if (!implementsAny)
+        {
+            throw new ArgumentException("TConsumer must implement at least one IMetricsConsumer interface.", nameof(TConsumer));
         }
 
         services.TryAddSingleton<TConsumer>();

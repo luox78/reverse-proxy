@@ -9,17 +9,32 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.Cors.Infrastructure;
 using Microsoft.AspNetCore.Http;
+#if NET8_0_OR_GREATER
+using Microsoft.AspNetCore.Http.Timeouts;
+#endif
+#if NET7_0_OR_GREATER
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.OutputCaching;
+#endif
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Patterns;
 using Yarp.ReverseProxy.Model;
 using CorsConstants = Yarp.ReverseProxy.Configuration.CorsConstants;
 using AuthorizationConstants = Yarp.ReverseProxy.Configuration.AuthorizationConstants;
+using RateLimitingConstants = Yarp.ReverseProxy.Configuration.RateLimitingConstants;
+using TimeoutPolicyConstants = Yarp.ReverseProxy.Configuration.TimeoutPolicyConstants;
 
 namespace Yarp.ReverseProxy.Routing;
 
 internal sealed class ProxyEndpointFactory
 {
     private static readonly IAuthorizeData _defaultAuthorization = new AuthorizeAttribute();
+#if NET7_0_OR_GREATER
+    private static readonly DisableRateLimitingAttribute _disableRateLimit = new();
+#endif
+#if NET8_0_OR_GREATER
+    private static readonly DisableRequestTimeoutAttribute _disableRequestTimeout = new();
+#endif
     private static readonly IEnableCorsAttribute _defaultCors = new EnableCorsAttribute();
     private static readonly IDisableCorsAttribute _disableCors = new DisableCorsAttribute();
     private static readonly IAllowAnonymous _allowAnonymous = new AllowAnonymousAttribute();
@@ -109,6 +124,41 @@ internal sealed class ProxyEndpointFactory
         {
             endpointBuilder.Metadata.Add(new AuthorizeAttribute(config.AuthorizationPolicy));
         }
+
+#if NET7_0_OR_GREATER
+        if (string.Equals(RateLimitingConstants.Default, config.RateLimiterPolicy, StringComparison.OrdinalIgnoreCase))
+        {
+            // No-op (middleware applies the default)
+        }
+        else if (string.Equals(RateLimitingConstants.Disable, config.RateLimiterPolicy, StringComparison.OrdinalIgnoreCase))
+        {
+            endpointBuilder.Metadata.Add(_disableRateLimit);
+        }
+        else if (!string.IsNullOrEmpty(config.RateLimiterPolicy))
+        {
+            endpointBuilder.Metadata.Add(new EnableRateLimitingAttribute(config.RateLimiterPolicy));
+        }
+
+        if (!string.IsNullOrEmpty(config.OutputCachePolicy))
+        {
+            endpointBuilder.Metadata.Add(new OutputCacheAttribute { PolicyName = config.OutputCachePolicy });
+        }
+#endif
+#if NET8_0_OR_GREATER
+        if (string.Equals(TimeoutPolicyConstants.Disable, config.TimeoutPolicy, StringComparison.OrdinalIgnoreCase))
+        {
+            endpointBuilder.Metadata.Add(_disableRequestTimeout);
+        }
+        // The config validator shouldn't allow both TimeoutPolicy and Timeout, so we don't have to consider priority.
+        else if (!string.IsNullOrEmpty(config.TimeoutPolicy))
+        {
+            endpointBuilder.Metadata.Add(new RequestTimeoutAttribute(config.TimeoutPolicy));
+        }
+        else if (config.Timeout.HasValue)
+        {
+            endpointBuilder.Metadata.Add(new RequestTimeoutAttribute((int)config.Timeout.Value.TotalMilliseconds));
+        }
+#endif
 
         for (var i = 0; i < conventions.Count; i++)
         {

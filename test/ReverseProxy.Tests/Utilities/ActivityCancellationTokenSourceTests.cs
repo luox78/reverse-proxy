@@ -30,7 +30,7 @@ public class ActivityCancellationTokenSourceTests
             }
         }
 
-        Assert.True(false, "CancellationTokenSources were not pooled");
+        Assert.Fail("CancellationTokenSources were not pooled");
     }
 
     [Fact]
@@ -45,25 +45,54 @@ public class ActivityCancellationTokenSourceTests
     }
 
     [Fact]
-    public void ActivityCancellationTokenSource_RespectsLinkedToken()
+    public void ActivityCancellationTokenSource_RespectsLinkedToken1()
     {
         var linkedCts = new CancellationTokenSource();
 
         var cts = ActivityCancellationTokenSource.Rent(TimeSpan.FromSeconds(10), linkedCts.Token);
         linkedCts.Cancel();
 
+        Assert.True(cts.CancelledByLinkedToken);
+        Assert.True(cts.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void ActivityCancellationTokenSource_RespectsLinkedToken2()
+    {
+        var linkedCts = new CancellationTokenSource();
+
+        var cts = ActivityCancellationTokenSource.Rent(TimeSpan.FromSeconds(10), default, linkedCts.Token);
+        linkedCts.Cancel();
+
+        Assert.True(cts.CancelledByLinkedToken);
+        Assert.True(cts.IsCancellationRequested);
+    }
+
+    [Fact]
+    public void ActivityCancellationTokenSource_RespectsBothLinkedTokens()
+    {
+        var linkedCts1 = new CancellationTokenSource();
+        var linkedCts2 = new CancellationTokenSource();
+
+        var cts = ActivityCancellationTokenSource.Rent(TimeSpan.FromSeconds(10), linkedCts1.Token, linkedCts2.Token);
+        linkedCts1.Cancel();
+        linkedCts2.Cancel();
+
+        Assert.True(cts.CancelledByLinkedToken);
         Assert.True(cts.IsCancellationRequested);
     }
 
     [Fact]
     public void ActivityCancellationTokenSource_ClearsRegistrations()
     {
-        var linkedCts = new CancellationTokenSource();
+        var linkedCts1 = new CancellationTokenSource();
+        var linkedCts2 = new CancellationTokenSource();
 
-        var cts = ActivityCancellationTokenSource.Rent(TimeSpan.FromSeconds(10), linkedCts.Token);
+        var cts = ActivityCancellationTokenSource.Rent(TimeSpan.FromSeconds(10), linkedCts1.Token, linkedCts2.Token);
         cts.Return();
 
-        linkedCts.Cancel();
+        linkedCts1.Cancel();
+        linkedCts2.Cancel();
 
         Assert.False(cts.IsCancellationRequested);
     }
@@ -77,12 +106,13 @@ public class ActivityCancellationTokenSourceTests
         {
             if (cts.IsCancellationRequested)
             {
+                Assert.False(cts.CancelledByLinkedToken);
                 return;
             }
 
             await Task.Delay(1);
         }
 
-        Assert.True(false, "Cts was not canceled");
+        Assert.Fail("Cts was not canceled");
     }
 }

@@ -5,6 +5,7 @@ using k8s;
 using k8s.Models;
 using System;
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json.Serialization;
 
 namespace Yarp.Kubernetes.Controller;
 
@@ -21,7 +22,7 @@ public struct NamespacedName : IEquatable<NamespacedName>
     /// </summary>
     /// <param name="namespace">The namespace.</param>
     /// <param name="name">The name.</param>
-    [Newtonsoft.Json.JsonConstructor]
+    [JsonConstructor]
     public NamespacedName(string @namespace, string name)
     {
         Namespace = @namespace;
@@ -125,6 +126,6 @@ public struct NamespacedName : IEquatable<NamespacedName>
     /// <returns>A <see cref="string" /> that represents this instance.</returns>
     public override string ToString()
     {
-        return $"{Name}.{Namespace}";
+        return $"{Namespace}/{Name}";
     }
 }

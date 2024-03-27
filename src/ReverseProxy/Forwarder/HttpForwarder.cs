@@ -5,12 +5,16 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+#if NET8_0_OR_GREATER
+using Microsoft.AspNetCore.Http.Timeouts;
+#endif
 using Microsoft.AspNetCore.Server.Kestrel.Core.Features;
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Logging;
@@ -24,16 +28,17 @@ namespace Yarp.ReverseProxy.Forwarder;
 /// </summary>
 internal sealed class HttpForwarder : IHttpForwarder
 {
+    private static readonly string WebSocketName = "websocket";
     private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(100);
     private static readonly Version DefaultVersion = HttpVersion.Version20;
     private static readonly HttpVersionPolicy DefaultVersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
     private readonly ILogger _logger;
-    private readonly IClock _clock;
+    private readonly TimeProvider _timeProvider;
 
-    public HttpForwarder(ILogger<HttpForwarder> logger, IClock clock)
+    public HttpForwarder(ILogger<HttpForwarder> logger, TimeProvider timeProvider)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _clock = clock ?? throw new ArgumentNullException(nameof(clock));
+        _timeProvider = timeProvider ?? throw new ArgumentNullException(nameof(timeProvider));
     }
 
     /// <summary>
@@ -81,18 +86,32 @@ internal sealed class HttpForwarder : IHttpForwarder
     /// ASP .NET Core (Kestrel) will finally send response trailers (if any)
     /// after we complete the steps above and relinquish control.
     /// </remarks>
-    public async ValueTask<ForwarderError> SendAsync(
+    public ValueTask<ForwarderError> SendAsync(
         HttpContext context,
         string destinationPrefix,
         HttpMessageInvoker httpClient,
         ForwarderRequestConfig requestConfig,
         HttpTransformer transformer)
+        => SendAsync(context, destinationPrefix, httpClient, requestConfig, transformer, CancellationToken.None);
+
+    public async ValueTask<ForwarderError> SendAsync(
+        HttpContext context,
+        string destinationPrefix,
+        HttpMessageInvoker httpClient,
+        ForwarderRequestConfig requestConfig,
+        HttpTransformer transformer,
+        CancellationToken cancellationToken)
     {
         _ = context ?? throw new ArgumentNullException(nameof(context));
         _ = destinationPrefix ?? throw new ArgumentNullException(nameof(destinationPrefix));
         _ = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _ = requestConfig ?? throw new ArgumentNullException(nameof(requestConfig));
         _ = transformer ?? throw new ArgumentNullException(nameof(transformer));
+
+        if (RequestUtilities.IsResponseSet(context.Response))
+        {
+            throw new InvalidOperationException("The request cannot be forwarded, the response has already started");
+        }
 
         // HttpClient overload for SendAsync changes response behavior to fully buffered which impacts performance
         // See discussion in https://github.com/microsoft/reverse-proxy/issues/458
@@ -101,9 +120,15 @@ internal sealed class HttpForwarder : IHttpForwarder
             throw new ArgumentException($"The http client must be of type HttpMessageInvoker, not HttpClient", nameof(httpClient));
         }
 
+        // "http://a".Length = 8
+        if (destinationPrefix is null || destinationPrefix.Length < 8)
+        {
+            throw new ArgumentException("Invalid destination prefix.", nameof(destinationPrefix));
+        }
+
         ForwarderTelemetry.Log.ForwarderStart(destinationPrefix);
 
-        var activityCancellationSource = ActivityCancellationTokenSource.Rent(requestConfig?.ActivityTimeout ?? DefaultTimeout, context.RequestAborted);
+        var activityCancellationSource = ActivityCancellationTokenSource.Rent(requestConfig?.ActivityTimeout ?? DefaultTimeout, context.RequestAborted, cancellationToken);
         try
         {
             var isClientHttp2OrGreater = ProtocolHelper.IsHttp2OrGreater(context.Request.Protocol);
@@ -112,33 +137,90 @@ internal sealed class HttpForwarder : IHttpForwarder
             // See https://github.com/microsoft/reverse-proxy/issues/118 for design discussion.
             var isStreamingRequest = isClientHttp2OrGreater && ProtocolHelper.IsGrpcContentType(context.Request.ContentType);
 
-            // :: Step 1-3: Create outgoing HttpRequestMessage
-            var (destinationRequest, requestContent) = await CreateRequestMessageAsync(
-                context, destinationPrefix, transformer, requestConfig, isStreamingRequest, activityCancellationSource);
-
-            // :: Step 4: Send the outgoing request using HttpClient
+            HttpRequestMessage? destinationRequest = null;
+            StreamCopyHttpContent? requestContent = null;
             HttpResponseMessage destinationResponse;
             try
             {
-                ForwarderTelemetry.Log.ForwarderStage(ForwarderStage.SendAsyncStart);
-                destinationResponse = await httpClient.SendAsync(destinationRequest, activityCancellationSource.Token);
-                ForwarderTelemetry.Log.ForwarderStage(ForwarderStage.SendAsyncStop);
+                // :: Step 1-3: Create outgoing HttpRequestMessage
+                bool tryDowngradingH2WsOnFailure;
+                (destinationRequest, requestContent, tryDowngradingH2WsOnFailure) = await CreateRequestMessageAsync(
+                    context, destinationPrefix, transformer, requestConfig, isStreamingRequest, activityCancellationSource);
 
-                // Reset the timeout since we received the response headers.
-                activityCancellationSource.ResetTimeout();
+                // Transforms generated a response, do not proxy.
+                if (RequestUtilities.IsResponseSet(context.Response))
+                {
+                    Log.NotProxying(_logger, context.Response.StatusCode);
+                    return ForwarderError.None;
+                }
+
+                Log.Proxying(_logger, destinationRequest, isStreamingRequest);
+
+                // :: Step 4: Send the outgoing request using HttpClient
+                ForwarderTelemetry.Log.ForwarderStage(ForwarderStage.SendAsyncStart);
+
+                try
+                {
+                    destinationResponse = await httpClient.SendAsync(destinationRequest, activityCancellationSource.Token);
+                }
+                catch (HttpRequestException hre) when (tryDowngradingH2WsOnFailure)
+                {
+                    Debug.Assert(requestContent is null);
+                    // This is how SocketsHttpHandler communicates to us that we tried a HTTP/2 extension that wasn't
+                    // enabled by the server. We should retry on HTTP/1.1.
+                    if (hre.Data.Contains("SETTINGS_ENABLE_CONNECT_PROTOCOL"))
+                    {
+                        Debug.Assert(false == (bool?)hre.Data["SETTINGS_ENABLE_CONNECT_PROTOCOL"]);
+                        Log.RetryingWebSocketDowngradeNoConnect(_logger);
+                    }
+                    // This is how SocketsHttpHandler communicates to us that we tried HTTP/2, but the server only supports
+                    // HTTP/1.x (as determined by ALPN). We'll only get this when using TLS/https. Retry on HTTP/1.1.
+                    // We don't let SocketsHttpHandler downgrade automatically for us because we need to send different headers.
+                    else if (hre.Data.Contains("HTTP2_ENABLED"))
+                    {
+                        Debug.Assert(false == (bool?)hre.Data["HTTP2_ENABLED"]);
+                        Log.RetryingWebSocketDowngradeNoHttp2(_logger);
+                    }
+                    else
+                    {
+                        throw;
+                    }
+
+                    // Trying again
+                    activityCancellationSource.ResetTimeout();
+
+                    var config = requestConfig! with
+                    {
+                        Version = HttpVersion.Version11,
+                        VersionPolicy = HttpVersionPolicy.RequestVersionExact
+                    };
+
+                    // Set the request back to null while we call into CreateRequestMessageAsync so that
+                    // potential exceptions are correctly treated as 'RequestCreation'.
+                    destinationRequest = null;
+
+                    (destinationRequest, requestContent, _) = await CreateRequestMessageAsync(
+                        context, destinationPrefix, transformer, config, isStreamingRequest, activityCancellationSource);
+
+                    destinationResponse = await httpClient.SendAsync(destinationRequest, activityCancellationSource.Token);
+                }
             }
             catch (Exception requestException)
             {
-                return await HandleRequestFailureAsync(context, requestContent, requestException, transformer, activityCancellationSource);
+                return await HandleRequestFailureAsync(context, requestContent, requestException, transformer, activityCancellationSource,
+                    failedDuringRequestCreation: destinationRequest is null);
             }
 
+            ForwarderTelemetry.Log.ForwarderStage(ForwarderStage.SendAsyncStop);
+            // Reset the timeout since we received the response headers.
+            activityCancellationSource.ResetTimeout();
             Log.ResponseReceived(_logger, destinationResponse);
 
             try
             {
                 // :: Step 5: Copy response status line Client ◄-- Proxy ◄-- Destination
                 // :: Step 6: Copy response headers Client ◄-- Proxy ◄-- Destination
-                var copyBody = await CopyResponseStatusAndHeadersAsync(destinationResponse, context, transformer);
+                var copyBody = await CopyResponseStatusAndHeadersAsync(destinationResponse, context, transformer, activityCancellationSource.Token);
 
                 if (!copyBody)
                 {
@@ -172,7 +254,15 @@ internal sealed class HttpForwarder : IHttpForwarder
             }
 
             // :: Step 7-A: Check for a 101 upgrade response, this takes care of WebSockets as well as any other upgradeable protocol.
-            if (destinationResponse.StatusCode == HttpStatusCode.SwitchingProtocols)
+            // Also check for HTTP/2 CONNECT 200 responses, they function similarly.
+            if (destinationResponse.StatusCode == HttpStatusCode.SwitchingProtocols
+#if NET7_0_OR_GREATER
+                || (destinationResponse.StatusCode == HttpStatusCode.OK
+                && destinationResponse.Version == HttpVersion.Version20
+                && destinationRequest.Headers.Protocol is not null
+                && destinationRequest.Method.Equals(HttpMethod.Connect))
+#endif
+                )
             {
                 Debug.Assert(requestContent?.Started != true);
                 return await HandleUpgradedResponse(context, destinationResponse, activityCancellationSource);
@@ -197,7 +287,7 @@ internal sealed class HttpForwarder : IHttpForwarder
             }
 
             // :: Step 8: Copy response trailer headers and finish response Client ◄-- Proxy ◄-- Destination
-            await CopyResponseTrailingHeadersAsync(destinationResponse, context, transformer);
+            await CopyResponseTrailingHeadersAsync(destinationResponse, context, transformer, activityCancellationSource.Token);
 
             if (isStreamingRequest)
             {
@@ -245,53 +335,110 @@ internal sealed class HttpForwarder : IHttpForwarder
         return ForwarderError.None;
     }
 
-    private async ValueTask<(HttpRequestMessage, StreamCopyHttpContent?)> CreateRequestMessageAsync(HttpContext context, string destinationPrefix,
+    private async ValueTask<(HttpRequestMessage, StreamCopyHttpContent?, bool)> CreateRequestMessageAsync(HttpContext context, string destinationPrefix,
         HttpTransformer transformer, ForwarderRequestConfig? requestConfig, bool isStreamingRequest, ActivityCancellationTokenSource activityToken)
     {
-        // "http://a".Length = 8
-        if (destinationPrefix is null || destinationPrefix.Length < 8)
-        {
-            throw new ArgumentException("Invalid destination prefix.", nameof(destinationPrefix));
-        }
-
         var destinationRequest = new HttpRequestMessage();
-
-        destinationRequest.Method = RequestUtilities.GetHttpMethod(context.Request.Method);
 
         var upgradeFeature = context.Features.Get<IHttpUpgradeFeature>();
         var upgradeHeader = context.Request.Headers[HeaderNames.Upgrade].ToString();
-        var isUpgradeRequest = (upgradeFeature?.IsUpgradableRequest ?? false)
-            // Mitigate https://github.com/microsoft/reverse-proxy/issues/255, IIS considers all requests upgradeable.
-            && (string.Equals("WebSocket", upgradeHeader, StringComparison.OrdinalIgnoreCase)
-                // https://github.com/microsoft/reverse-proxy/issues/467 for kubernetes APIs
-                || upgradeHeader.StartsWith("SPDY/", StringComparison.OrdinalIgnoreCase));
 
-        // Default to HTTP/1.1 for proxying upgradeable requests. This is already the default as of .NET Core 3.1
-        // Otherwise request what's set in proxyOptions (e.g. default HTTP/2) and let HttpClient negotiate the protocol
-        // based on VersionPolicy. For example, downgrading to HTTP/1.1 if it cannot establish HTTP/2 with the target.
-        // This is done without extra round-trips thanks to ALPN. We can detect a downgrade after calling HttpClient.SendAsync
-        // (see Step 3 below). TBD how this will change when HTTP/3 is supported.
-        destinationRequest.Version = isUpgradeRequest ? ProtocolHelper.Http11Version : (requestConfig?.Version ?? DefaultVersion);
-        destinationRequest.VersionPolicy = isUpgradeRequest ? HttpVersionPolicy.RequestVersionOrLower : (requestConfig?.VersionPolicy ?? DefaultVersionPolicy);
+        var isSpdyRequest = (upgradeFeature?.IsUpgradableRequest ?? false)
+            && upgradeHeader.StartsWith("SPDY/", StringComparison.OrdinalIgnoreCase);
+        var isH1WsRequest = (upgradeFeature?.IsUpgradableRequest ?? false)
+            && string.Equals(WebSocketName, upgradeHeader, StringComparison.OrdinalIgnoreCase);
+        var incomingUpgrade = isSpdyRequest || isH1WsRequest;
+        var isH2WsRequest = false;
+#if NET7_0_OR_GREATER
+        var connectFeature = context.Features.Get<IHttpExtendedConnectFeature>();
+        var connectProtocol = connectFeature?.Protocol;
+        isH2WsRequest = (connectFeature?.IsExtendedConnect ?? false)
+            && string.Equals(WebSocketName, connectProtocol, StringComparison.OrdinalIgnoreCase);
+#endif
+
+        var outgoingHttps = destinationPrefix.StartsWith("https://");
+        var outgoingVersion = requestConfig?.Version ?? DefaultVersion;
+        var outgoingPolicy = requestConfig?.VersionPolicy ?? DefaultVersionPolicy;
+        var outgoingUpgrade = false;
+        var outgoingConnect = false;
+        var tryDowngradingH2WsOnFailure = false;
+        if (isSpdyRequest)
+        {
+            // Can only be done on HTTP/1.1, force regardless of options.
+            outgoingUpgrade = true;
+        }
+        else if (isH1WsRequest || isH2WsRequest)
+        {
+            switch (outgoingVersion.Major, outgoingPolicy, outgoingHttps)
+            {
+#if NET7_0_OR_GREATER
+                case (2, HttpVersionPolicy.RequestVersionExact, _):
+                case (2, HttpVersionPolicy.RequestVersionOrHigher, true):
+                    outgoingConnect = true;
+                    break;
+                case (1, HttpVersionPolicy.RequestVersionOrHigher, true):
+                case (2, HttpVersionPolicy.RequestVersionOrLower, true):
+                case (3, HttpVersionPolicy.RequestVersionOrLower, true):
+                    // Try H2WS, downgrade if needed.
+                    outgoingConnect = true;
+                    tryDowngradingH2WsOnFailure = true;
+                    break;
+#endif
+                // 1.x Lower or Exact, regardless of HTTPS
+                // Anything else without HTTPS except 2 Exact
+                default:
+                    // Override to use HTTP/1.1, nothing else is supported.
+                    outgoingUpgrade = true;
+                    break;
+            }
+        }
+
+        if (outgoingUpgrade)
+        {
+            // Can only be done on HTTP/1.1, force regardless of options.
+            destinationRequest.Version = HttpVersion.Version11;
+            destinationRequest.VersionPolicy = HttpVersionPolicy.RequestVersionOrLower;
+            destinationRequest.Method = HttpMethod.Get;
+        }
+#if NET7_0_OR_GREATER
+        else if (outgoingConnect)
+        {
+            // HTTP/2 only (for now).
+            destinationRequest.Version = HttpVersion.Version20;
+            destinationRequest.VersionPolicy = HttpVersionPolicy.RequestVersionExact;
+            destinationRequest.Method = HttpMethod.Connect;
+            destinationRequest.Headers.Protocol = connectProtocol ?? WebSocketName;
+        }
+#endif
+        else
+        {
+            destinationRequest.Method = RequestUtilities.GetHttpMethod(context.Request.Method);
+            destinationRequest.Version = outgoingVersion;
+            destinationRequest.VersionPolicy = outgoingPolicy;
+        }
 
         // :: Step 2: Setup copy of request body (background) Client --► Proxy --► Destination
         // Note that we must do this before step (3) because step (3) may also add headers to the HttpContent that we set up here.
-        var requestContent = SetupRequestBodyCopy(context.Request, isStreamingRequest, activityToken);
+        var requestContent = SetupRequestBodyCopy(context, isStreamingRequest, activityToken);
         destinationRequest.Content = requestContent;
 
         // :: Step 3: Copy request headers Client --► Proxy --► Destination
-        await transformer.TransformRequestAsync(context, destinationRequest, destinationPrefix);
+        await transformer.TransformRequestAsync(context, destinationRequest, destinationPrefix, activityToken.Token);
 
-        if (isUpgradeRequest)
+        // The transformer generated a response, do not forward.
+        if (RequestUtilities.IsResponseSet(context.Response))
         {
-            RestoreUpgradeHeaders(context, destinationRequest);
+            return (destinationRequest, requestContent, false);
         }
+
+        // Transforms may have taken a while, especially if they buffered the body, they count as forward progress.
+        activityToken.ResetTimeout();
+
+        FixupUpgradeRequestHeaders(context, destinationRequest, outgoingUpgrade, outgoingConnect);
 
         // Allow someone to custom build the request uri, otherwise provide a default for them.
         var request = context.Request;
         destinationRequest.RequestUri ??= RequestUtilities.MakeDestinationAddress(destinationPrefix, request.Path, request.QueryString);
-
-        Log.Proxying(_logger, destinationRequest, isStreamingRequest);
 
         if (requestConfig?.AllowResponseBuffering != true)
         {
@@ -299,35 +446,66 @@ internal sealed class HttpForwarder : IHttpForwarder
         }
 
         // TODO: What if they replace the HttpContent object? That would mess with our tracking and error handling.
-        return (destinationRequest, requestContent);
+        return (destinationRequest, requestContent, tryDowngradingH2WsOnFailure);
     }
 
-    private static void RestoreUpgradeHeaders(HttpContext context, HttpRequestMessage request)
+    // Connection and Upgrade headers were not copied with the rest of the headers.
+    private void FixupUpgradeRequestHeaders(HttpContext context, HttpRequestMessage request, bool outgoingUpgrade, bool outgoingConnect)
     {
-        var connectionValues = context.Request.Headers.GetCommaSeparatedValues(HeaderNames.Connection);
-        string? connectionUpgradeValue = null;
-        foreach (var headerValue in connectionValues)
+        if (outgoingUpgrade)
         {
-            if (headerValue.Equals("upgrade", StringComparison.OrdinalIgnoreCase))
+            // H2->H1, add Connection, Upgrade, Sec-WebSocket-Key
+            if (HttpProtocol.IsHttp2(context.Request.Protocol))
             {
-                connectionUpgradeValue = headerValue;
-                break;
+                request.Headers.TryAddWithoutValidation(HeaderNames.Connection, HeaderNames.Upgrade);
+                request.Headers.TryAddWithoutValidation(HeaderNames.Upgrade, WebSocketName);
+                var key = ProtocolHelper.CreateSecWebSocketKey();
+                request.Headers.TryAddWithoutValidation(HeaderNames.SecWebSocketKey, key);
+            }
+            // H1->H1, re-add the original Connection, Upgrade headers.
+            else
+            {
+                var connectionValues = context.Request.Headers.GetCommaSeparatedValues(HeaderNames.Connection);
+                string? connectionUpgradeValue = null;
+                foreach (var headerValue in connectionValues)
+                {
+                    if (headerValue.Equals(HeaderNames.Upgrade, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Preserve original value, case
+                        connectionUpgradeValue = headerValue;
+                        break;
+                    }
+                }
+
+                if (connectionUpgradeValue is not null && context.Request.Headers.TryGetValue(HeaderNames.Upgrade, out var upgradeValue))
+                {
+                    request.Headers.TryAddWithoutValidation(HeaderNames.Connection, connectionUpgradeValue);
+                    request.Headers.TryAddWithoutValidation(HeaderNames.Upgrade, (IEnumerable<string>)upgradeValue);
+                }
             }
         }
-
-        if (connectionUpgradeValue is not null && context.Request.Headers.TryGetValue(HeaderNames.Upgrade, out var upgradeValue))
+        // H1->H2, remove Sec-WebSocket-Key
+        else if (outgoingConnect && !HttpProtocol.IsHttp2(context.Request.Protocol))
         {
-            request.Headers.TryAddWithoutValidation(HeaderNames.Connection, connectionUpgradeValue);
-            request.Headers.TryAddWithoutValidation(HeaderNames.Upgrade, (IEnumerable<string>)upgradeValue);
+            var key = context.Request.Headers[HeaderNames.SecWebSocketKey];
+            if (!ProtocolHelper.CheckSecWebSocketKey(key))
+            {
+                Log.InvalidSecWebSocketKeyHeader(_logger, key);
+                // The request will not be forwarded if we change the status code.
+                context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            }
+            request.Headers.Remove(HeaderNames.SecWebSocketKey);
         }
+        // else not an upgrade, or H2->H2, no changes needed
     }
 
-    private StreamCopyHttpContent? SetupRequestBodyCopy(HttpRequest request, bool isStreamingRequest, ActivityCancellationTokenSource activityToken)
+    private StreamCopyHttpContent? SetupRequestBodyCopy(HttpContext context, bool isStreamingRequest, ActivityCancellationTokenSource activityToken)
     {
         // If we generate an HttpContent without a Content-Length then for HTTP/1.1 HttpClient will add a Transfer-Encoding: chunked header
         // even if it's a GET request. Some servers reject requests containing a Transfer-Encoding header if they're not expecting a body.
         // Try to be as specific as possible about the client's intent to send a body. The one thing we don't want to do is to start
         // reading the body early because that has side-effects like 100-continue.
+        var request = context.Request;
         var hasBody = true;
         var contentLength = request.Headers.ContentLength;
         var method = request.Method;
@@ -337,6 +515,16 @@ internal sealed class HttpForwarder : IHttpForwarder
         {
             // 5.0 servers provide a definitive answer for us.
             hasBody = canHaveBodyFeature.CanHaveBody;
+
+#if NET7_0
+            // TODO: Kestrel 7.0 bug only, hasBody shouldn't be true for ExtendedConnect.
+            // https://github.com/dotnet/aspnetcore/issues/46002 Fixed in 8.0
+            var connectFeature = request.HttpContext.Features.Get<IHttpExtendedConnectFeature>();
+            if (connectFeature?.IsExtendedConnect == true)
+            {
+                hasBody = false;
+            }
+#endif
         }
         // https://tools.ietf.org/html/rfc7230#section-3.3.3
         // All HTTP/1.1 requests should have Transfer-Encoding or Content-Length.
@@ -377,31 +565,13 @@ internal sealed class HttpForwarder : IHttpForwarder
 
         if (hasBody)
         {
-            if (isStreamingRequest)
-            {
-                DisableMinRequestBodyDataRateAndMaxRequestBodySize(request.HttpContext);
-            }
-
-            // Note on `autoFlushHttpClientOutgoingStream: isStreamingRequest`:
-            // The.NET Core HttpClient stack keeps its own buffers on top of the underlying outgoing connection socket.
-            // We flush those buffers down to the socket on every write when this is set,
-            // but it does NOT result in calls to flush on the underlying socket.
-            // This is necessary because we proxy http2 transparently,
-            // and we are deliberately unaware of packet structure used e.g. in gRPC duplex channels.
-            // Because the sockets aren't flushed, the perf impact of this choice is expected to be small.
-            // Future: It may be wise to set this to true for *all* http2 incoming requests,
-            // but for now, out of an abundance of caution, we only do it for requests that look like gRPC.
-            return new StreamCopyHttpContent(
-                request: request,
-                autoFlushHttpClientOutgoingStream: isStreamingRequest,
-                clock: _clock,
-                activityToken);
+            return new StreamCopyHttpContent(context, isStreamingRequest, _timeProvider, _logger, activityToken);
         }
 
         return null;
     }
 
-    private ForwarderError HandleRequestBodyFailure(HttpContext context, StreamCopyResult requestBodyCopyResult, Exception requestBodyException, Exception additionalException)
+    private ForwarderError HandleRequestBodyFailure(HttpContext context, StreamCopyResult requestBodyCopyResult, Exception requestBodyException, Exception additionalException, bool timedOut)
     {
         ForwarderError requestBodyError;
         int statusCode;
@@ -410,19 +580,17 @@ internal sealed class HttpForwarder : IHttpForwarder
             // Failed while trying to copy the request body from the client. It's ambiguous if the request or response failed first.
             case StreamCopyResult.InputError:
                 requestBodyError = ForwarderError.RequestBodyClient;
-                statusCode = StatusCodes.Status400BadRequest;
+                statusCode = timedOut
+                    ? StatusCodes.Status408RequestTimeout
+                    // Attempt to capture the status code from the request exception if available.
+                    : requestBodyException is BadHttpRequestException badHttpRequestException
+                        ? badHttpRequestException.StatusCode
+                        : StatusCodes.Status400BadRequest;
                 break;
             // Failed while trying to copy the request body to the destination. It's ambiguous if the request or response failed first.
             case StreamCopyResult.OutputError:
                 requestBodyError = ForwarderError.RequestBodyDestination;
-                statusCode = StatusCodes.Status502BadGateway;
-                break;
-            // Canceled while trying to copy the request body, either due to a client disconnect or a timeout. This probably caused the response to fail as a secondary error.
-            case StreamCopyResult.Canceled:
-                requestBodyError = ForwarderError.RequestBodyCanceled;
-                // Timeouts (504s) are handled at the SendAsync call site.
-                // The request body should only be canceled by the RequestAborted token.
-                statusCode = StatusCodes.Status502BadGateway;
+                statusCode = timedOut ? StatusCodes.Status504GatewayTimeout : StatusCodes.Status502BadGateway;
                 break;
             default:
                 throw new NotImplementedException(requestBodyCopyResult.ToString());
@@ -444,36 +612,51 @@ internal sealed class HttpForwarder : IHttpForwarder
         return requestBodyError;
     }
 
-    private async ValueTask<ForwarderError> HandleRequestFailureAsync(HttpContext context, StreamCopyHttpContent? requestContent, Exception requestException, HttpTransformer transformer, CancellationTokenSource requestCancellationSource)
+    private async ValueTask<ForwarderError> HandleRequestFailureAsync(HttpContext context, StreamCopyHttpContent? requestContent, Exception requestException,
+        HttpTransformer transformer, ActivityCancellationTokenSource requestCancellationSource, bool failedDuringRequestCreation)
     {
-        if (requestException is OperationCanceledException)
+        var triedRequestBody = requestContent?.ConsumptionTask.IsCompleted == true;
+
+        if (requestCancellationSource.CancelledByLinkedToken)
         {
-            if (context.RequestAborted.IsCancellationRequested)
+            var requestBodyCanceled = false;
+            if (triedRequestBody)
             {
-                return await ReportErrorAsync(ForwarderError.RequestCanceled, StatusCodes.Status502BadGateway);
+                var (requestBodyCopyResult, requestBodyException) = requestContent!.ConsumptionTask.Result;
+                requestBodyCanceled = requestBodyCopyResult == StreamCopyResult.Canceled;
+                if (requestBodyCanceled)
+                {
+                    requestException = new AggregateException(requestException, requestBodyException!);
+                }
             }
-            else
-            {
-                Debug.Assert(requestCancellationSource.IsCancellationRequested || requestException.ToString().Contains("ConnectTimeout"), requestException.ToString());
-                return await ReportErrorAsync(ForwarderError.RequestTimedOut, StatusCodes.Status504GatewayTimeout);
-            }
+            // Either the client went away (HttpContext.RequestAborted) or the CancellationToken provided to SendAsync was signaled.
+            return await ReportErrorAsync(requestBodyCanceled ? ForwarderError.RequestBodyCanceled : ForwarderError.RequestCanceled,
+                context.RequestAborted.IsCancellationRequested ? StatusCodes.Status400BadRequest : StatusCodes.Status502BadGateway);
         }
 
         // Check for request body errors, these may have triggered the response error.
-        if (requestContent?.ConsumptionTask.IsCompleted == true)
+        if (triedRequestBody)
         {
-            var (requestBodyCopyResult, requestBodyException) = requestContent.ConsumptionTask.Result;
+            var (requestBodyCopyResult, requestBodyException) = requestContent!.ConsumptionTask.Result;
 
-            if (requestBodyCopyResult != StreamCopyResult.Success)
+            if (requestBodyCopyResult is StreamCopyResult.InputError or StreamCopyResult.OutputError)
             {
-                var error = HandleRequestBodyFailure(context, requestBodyCopyResult, requestBodyException!, requestException);
-                await transformer.TransformResponseAsync(context, proxyResponse: null);
+                var error = HandleRequestBodyFailure(context, requestBodyCopyResult, requestBodyException!, requestException,
+                    timedOut: requestCancellationSource.IsCancellationRequested);
+                await transformer.TransformResponseAsync(context, proxyResponse: null, requestCancellationSource.Token);
                 return error;
             }
         }
 
+        if (requestException is OperationCanceledException)
+        {
+            Debug.Assert(requestCancellationSource.IsCancellationRequested || requestException.ToString().Contains("ConnectTimeout"), requestException.ToString());
+
+            return await ReportErrorAsync(ForwarderError.RequestTimedOut, StatusCodes.Status504GatewayTimeout);
+        }
+
         // We couldn't communicate with the destination.
-        return await ReportErrorAsync(ForwarderError.Request, StatusCodes.Status502BadGateway);
+        return await ReportErrorAsync(failedDuringRequestCreation ? ForwarderError.RequestCreation : ForwarderError.Request, StatusCodes.Status502BadGateway);
 
         async ValueTask<ForwarderError> ReportErrorAsync(ForwarderError error, int statusCode)
         {
@@ -486,12 +669,12 @@ internal sealed class HttpForwarder : IHttpForwarder
                 await requestContent.ConsumptionTask;
             }
 
-            await transformer.TransformResponseAsync(context, null);
+            await transformer.TransformResponseAsync(context, null, requestCancellationSource.Token);
             return error;
         }
     }
 
-    private static ValueTask<bool> CopyResponseStatusAndHeadersAsync(HttpResponseMessage source, HttpContext context, HttpTransformer transformer)
+    private static ValueTask<bool> CopyResponseStatusAndHeadersAsync(HttpResponseMessage source, HttpContext context, HttpTransformer transformer, CancellationToken cancellationToken)
     {
         context.Response.StatusCode = (int)source.StatusCode;
 
@@ -505,26 +688,7 @@ internal sealed class HttpForwarder : IHttpForwarder
         }
 
         // Copies headers
-        return transformer.TransformResponseAsync(context, source);
-    }
-
-    private static void RestoreUpgradeHeaders(HttpContext context, HttpResponseMessage response)
-    {
-        // We don't use NonValidated for the Connection header as we do want value validation.
-        // HttpHeaders.TryGetValues will handle the parsing and split the values for us.
-        if (RequestUtilities.TryGetValues(response.Headers, HeaderNames.Upgrade, out var upgradeValues)
-            && response.Headers.TryGetValues(HeaderNames.Connection, out var connectionValues))
-        {
-            foreach (var value in connectionValues)
-            {
-                if (value.Equals("upgrade", StringComparison.OrdinalIgnoreCase))
-                {
-                    context.Response.Headers.TryAdd(HeaderNames.Connection, value);
-                    context.Response.Headers.TryAdd(HeaderNames.Upgrade, upgradeValues);
-                    break;
-                }
-            }
-        }
+        return transformer.TransformResponseAsync(context, source, cancellationToken);
     }
 
     private async ValueTask<ForwarderError> HandleUpgradedResponse(HttpContext context, HttpResponseMessage destinationResponse,
@@ -532,31 +696,36 @@ internal sealed class HttpForwarder : IHttpForwarder
     {
         ForwarderTelemetry.Log.ForwarderStage(ForwarderStage.ResponseUpgrade);
 
-        // SocketHttpHandler and similar transports always provide an HttpContent object, even if it's empty.
-        // Note as of 5.0 HttpResponse.Content never returns null.
-        // https://github.com/dotnet/runtime/blame/8fc68f626a11d646109a758cb0fc70a0aa7826f1/src/libraries/System.Net.Http/src/System/Net/Http/HttpResponseMessage.cs#L46
-        if (destinationResponse.Content is null)
+        var isHttp2Request = HttpProtocol.IsHttp2(context.Request.Protocol);
+        var headerError = FixupUpgradeResponseHeaders(context, destinationResponse, isHttp2Request);
+        if (headerError != ForwarderError.None)
         {
-            throw new InvalidOperationException("A response content is required for upgrades.");
+            destinationResponse.Dispose();
+            return headerError;
         }
 
         // :: Step 7-A-1: Upgrade the client channel. This will also send response headers.
-        var upgradeFeature = context.Features.Get<IHttpUpgradeFeature>();
-        if (upgradeFeature is null)
-        {
-            var ex = new InvalidOperationException("Invalid 101 response when upgrades aren't supported.");
-            destinationResponse.Dispose();
-            context.Response.StatusCode = StatusCodes.Status502BadGateway;
-            ReportProxyError(context, ForwarderError.UpgradeResponseDestination, ex);
-            return ForwarderError.UpgradeResponseDestination;
-        }
-
-        RestoreUpgradeHeaders(context, destinationResponse);
-
         Stream upgradeResult;
         try
         {
-            upgradeResult = await upgradeFeature.UpgradeAsync();
+#if NET7_0_OR_GREATER
+            if (isHttp2Request)
+            {
+                var connectFeature = context.Features.Get<IHttpExtendedConnectFeature>();
+                Debug.Assert(connectFeature != null);
+                upgradeResult = await connectFeature.AcceptAsync();
+            }
+            else
+#endif
+            {
+                var upgradeFeature = context.Features.Get<IHttpUpgradeFeature>();
+                Debug.Assert(upgradeFeature != null);
+                upgradeResult = await upgradeFeature.UpgradeAsync();
+            }
+#if NET8_0_OR_GREATER
+            // Disable request timeout, if there is one, after the upgrade has been accepted
+            context.Features.Get<IHttpRequestTimeoutFeature>()?.DisableTimeout();
+#endif
         }
         catch (Exception ex)
         {
@@ -564,13 +733,16 @@ internal sealed class HttpForwarder : IHttpForwarder
             ReportProxyError(context, ForwarderError.UpgradeResponseClient, ex);
             return ForwarderError.UpgradeResponseClient;
         }
+
         using var clientStream = upgradeResult;
 
         // :: Step 7-A-2: Copy duplex streams
-        using var destinationStream = await destinationResponse.Content.ReadAsStreamAsync();
+        using var destinationStream = await destinationResponse.Content.ReadAsStreamAsync(activityCancellationSource.Token);
 
-        var requestTask = StreamCopier.CopyAsync(isRequest: true, clientStream, destinationStream, StreamCopier.UnknownLength, _clock, activityCancellationSource, activityCancellationSource.Token).AsTask();
-        var responseTask = StreamCopier.CopyAsync(isRequest: false, destinationStream, clientStream, StreamCopier.UnknownLength, _clock, activityCancellationSource, activityCancellationSource.Token).AsTask();
+        var requestTask = StreamCopier.CopyAsync(isRequest: true, clientStream, destinationStream, StreamCopier.UnknownLength, _timeProvider, activityCancellationSource,
+            // HTTP/2 HttpClient request streams buffer by default.
+            autoFlush: destinationResponse.Version == HttpVersion.Version20, activityCancellationSource.Token).AsTask();
+        var responseTask = StreamCopier.CopyAsync(isRequest: false, destinationStream, clientStream, StreamCopier.UnknownLength, _timeProvider, activityCancellationSource, activityCancellationSource.Token).AsTask();
 
         // Make sure we report the first failure.
         var firstTask = await Task.WhenAny(requestTask, responseTask);
@@ -582,7 +754,7 @@ internal sealed class HttpForwarder : IHttpForwarder
         var (firstResult, firstException) = await firstTask;
         if (firstResult != StreamCopyResult.Success)
         {
-            error = ReportResult(context, requestFinishedFirst, firstResult, firstException);
+            error = ReportResult(context, requestFinishedFirst, firstResult, firstException, activityCancellationSource);
             // Cancel the other direction
             activityCancellationSource.Cancel();
             // Wait for this to finish before exiting so the resources get cleaned up properly.
@@ -590,10 +762,17 @@ internal sealed class HttpForwarder : IHttpForwarder
         }
         else
         {
-            var (secondResult, secondException) = await secondTask;
-            if (secondResult != StreamCopyResult.Success)
+            var cancelReads = !requestFinishedFirst && !secondTask.IsCompleted;
+            if (cancelReads)
             {
-                error = ReportResult(context, !requestFinishedFirst, secondResult, secondException!);
+                // The response is finished, unblock the incoming reads
+                activityCancellationSource.Cancel();
+            }
+
+            var (secondResult, secondException) = await secondTask;
+            if (!cancelReads && secondResult != StreamCopyResult.Success)
+            {
+                error = ReportResult(context, !requestFinishedFirst, secondResult, secondException!, activityCancellationSource);
             }
             else
             {
@@ -603,18 +782,81 @@ internal sealed class HttpForwarder : IHttpForwarder
 
         return error;
 
-        ForwarderError ReportResult(HttpContext context, bool reqeuest, StreamCopyResult result, Exception exception)
+        ForwarderError ReportResult(HttpContext context, bool request, StreamCopyResult result, Exception exception, ActivityCancellationTokenSource activityCancellationTokenSource)
         {
             var error = result switch
             {
-                StreamCopyResult.InputError => reqeuest ? ForwarderError.UpgradeRequestClient : ForwarderError.UpgradeResponseDestination,
-                StreamCopyResult.OutputError => reqeuest ? ForwarderError.UpgradeRequestDestination : ForwarderError.UpgradeResponseClient,
-                StreamCopyResult.Canceled => reqeuest ? ForwarderError.UpgradeRequestCanceled : ForwarderError.UpgradeResponseCanceled,
+                StreamCopyResult.InputError => request ? ForwarderError.UpgradeRequestClient : ForwarderError.UpgradeResponseDestination,
+                StreamCopyResult.OutputError => request ? ForwarderError.UpgradeRequestDestination : ForwarderError.UpgradeResponseClient,
+                StreamCopyResult.Canceled => request ? ForwarderError.UpgradeRequestCanceled : ForwarderError.UpgradeResponseCanceled,
                 _ => throw new NotImplementedException(result.ToString()),
             };
+            if (activityCancellationSource.IsCancellationRequested && !activityCancellationSource.CancelledByLinkedToken)
+            {
+                error = ForwarderError.UpgradeActivityTimeout;
+            }
             ReportProxyError(context, error, exception);
             return error;
         }
+    }
+
+    // The Connection and Upgrade headers were not copied by default
+    private ForwarderError FixupUpgradeResponseHeaders(HttpContext context, HttpResponseMessage response, bool isHttp2Request)
+    {
+        if (isHttp2Request)
+        {
+            // H2 <- H1 Validate & remove the Sec-WebSocket-Accept header.
+            if (response.Version != HttpVersion.Version20)
+            {
+                var success = RequestUtilities.TryGetValues(response.RequestMessage!.Headers, HeaderNames.SecWebSocketKey, out var key);
+                Debug.Assert(success);
+                var accept = context.Response.Headers[HeaderNames.SecWebSocketAccept];
+                var expectedAccept = ProtocolHelper.CreateSecWebSocketAccept(key.ToString());
+                if (!string.Equals(expectedAccept, accept, StringComparison.Ordinal)) // Base64 is case sensitive
+                {
+                    context.Response.Clear();
+                    context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                    ReportProxyError(context, ForwarderError.ResponseHeaders, new InvalidOperationException("The Sec-WebSocket-Accept header does not match the expected value."));
+                    return ForwarderError.ResponseHeaders;
+                }
+                context.Response.Headers.Remove(HeaderNames.SecWebSocketAccept);
+                context.Response.StatusCode = StatusCodes.Status200OK;
+            }
+            // else H2 <- H2, no changes needed
+            return ForwarderError.None;
+        }
+
+        // H1 <- H2
+        if (response.Version == HttpVersion.Version20)
+        {
+            // Generate and add the Sec-WebSocket-Accept header, and the Connection and Upgrade headers
+            var key = context.Request.Headers[HeaderNames.SecWebSocketKey];
+            var accept = ProtocolHelper.CreateSecWebSocketAccept(key);
+            context.Response.Headers.TryAdd(HeaderNames.SecWebSocketAccept, accept);
+            context.Response.Headers.TryAdd(HeaderNames.Connection, HeaderNames.Upgrade);
+            context.Response.Headers.TryAdd(HeaderNames.Upgrade, WebSocketName);
+            return ForwarderError.None;
+        }
+
+        // H1 <- H1
+        // Restore the Connection and Upgrade headers
+        // We don't use NonValidated for the Connection header as we do want value validation.
+        // HttpHeaders.TryGetValues will handle the parsing and split the values for us.
+        if (RequestUtilities.TryGetValues(response.Headers, HeaderNames.Upgrade, out var upgradeValues)
+            && response.Headers.TryGetValues(HeaderNames.Connection, out var connectionValues))
+        {
+            foreach (var value in connectionValues)
+            {
+                if (value.Equals(HeaderNames.Upgrade, StringComparison.OrdinalIgnoreCase))
+                {
+                    context.Response.Headers.TryAdd(HeaderNames.Connection, value);
+                    context.Response.Headers.TryAdd(HeaderNames.Upgrade, upgradeValues);
+                    break;
+                }
+            }
+        }
+
+        return ForwarderError.None;
     }
 
     private async ValueTask<(StreamCopyResult, Exception?)> CopyResponseBodyAsync(HttpContent destinationResponseContent, Stream clientResponseStream,
@@ -626,15 +868,15 @@ internal sealed class HttpForwarder : IHttpForwarder
         // https://github.com/dotnet/runtime/blame/8fc68f626a11d646109a758cb0fc70a0aa7826f1/src/libraries/System.Net.Http/src/System/Net/Http/HttpResponseMessage.cs#L46
         if (destinationResponseContent is not null)
         {
-            using var destinationResponseStream = await destinationResponseContent.ReadAsStreamAsync();
+            using var destinationResponseStream = await destinationResponseContent.ReadAsStreamAsync(activityCancellationSource.Token);
             // The response content-length is enforced by the server.
-            return await StreamCopier.CopyAsync(isRequest: false, destinationResponseStream, clientResponseStream, StreamCopier.UnknownLength, _clock, activityCancellationSource, activityCancellationSource.Token);
+            return await StreamCopier.CopyAsync(isRequest: false, destinationResponseStream, clientResponseStream, StreamCopier.UnknownLength, _timeProvider, activityCancellationSource, activityCancellationSource.Token);
         }
 
         return (StreamCopyResult.Success, null);
     }
 
-    private async ValueTask<ForwarderError> HandleResponseBodyErrorAsync(HttpContext context, StreamCopyHttpContent? requestContent, StreamCopyResult responseBodyCopyResult, Exception responseBodyException, CancellationTokenSource requestCancellationSource)
+    private async ValueTask<ForwarderError> HandleResponseBodyErrorAsync(HttpContext context, StreamCopyHttpContent? requestContent, StreamCopyResult responseBodyCopyResult, Exception responseBodyException, ActivityCancellationTokenSource requestCancellationSource)
     {
         if (requestContent is not null && requestContent.Started)
         {
@@ -648,9 +890,10 @@ internal sealed class HttpForwarder : IHttpForwarder
             var (requestBodyCopyResult, requestBodyError) = await requestContent.ConsumptionTask;
 
             // Check for request body errors, these may have triggered the response error.
-            if (alreadyFinished && requestBodyCopyResult != StreamCopyResult.Success)
+            if (alreadyFinished && requestBodyCopyResult is StreamCopyResult.InputError or StreamCopyResult.OutputError)
             {
-                return HandleRequestBodyFailure(context, requestBodyCopyResult, requestBodyError!, responseBodyException);
+                return HandleRequestBodyFailure(context, requestBodyCopyResult, requestBodyError!, responseBodyException,
+                    timedOut: requestCancellationSource.IsCancellationRequested && !requestCancellationSource.CancelledByLinkedToken);
             }
         }
 
@@ -678,45 +921,10 @@ internal sealed class HttpForwarder : IHttpForwarder
         return error;
     }
 
-    private static ValueTask CopyResponseTrailingHeadersAsync(HttpResponseMessage source, HttpContext context, HttpTransformer transformer)
+    private static ValueTask CopyResponseTrailingHeadersAsync(HttpResponseMessage source, HttpContext context, HttpTransformer transformer, CancellationToken cancellationToken)
     {
         // Copies trailers
-        return transformer.TransformResponseTrailersAsync(context, source);
-    }
-
-
-    /// <summary>
-    /// Disable some ASP .NET Core server limits so that we can handle long-running gRPC requests unconstrained.
-    /// Note that the gRPC server implementation on ASP .NET Core does the same for client-streaming and duplex methods.
-    /// Since in Gateway we have no way to determine if the current request requires client-streaming or duplex comm,
-    /// we do this for *all* incoming requests that look like they might be gRPC.
-    /// </summary>
-    /// <remarks>
-    /// Inspired on
-    /// <see href="https://github.com/grpc/grpc-dotnet/blob/3ce9b104524a4929f5014c13cd99ba9a1c2431d4/src/Grpc.AspNetCore.Server/Internal/CallHandlers/ServerCallHandlerBase.cs#L127"/>.
-    /// </remarks>
-    private void DisableMinRequestBodyDataRateAndMaxRequestBodySize(HttpContext httpContext)
-    {
-        var minRequestBodyDataRateFeature = httpContext.Features.Get<IHttpMinRequestBodyDataRateFeature>();
-        if (minRequestBodyDataRateFeature is not null)
-        {
-            minRequestBodyDataRateFeature.MinDataRate = null;
-        }
-
-        var maxRequestBodySizeFeature = httpContext.Features.Get<IHttpMaxRequestBodySizeFeature>();
-        if (maxRequestBodySizeFeature is not null)
-        {
-            if (!maxRequestBodySizeFeature.IsReadOnly)
-            {
-                maxRequestBodySizeFeature.MaxRequestBodySize = null;
-            }
-            else
-            {
-                // IsReadOnly could be true if middleware has already started reading the request body
-                // In that case we can't disable the max request body size for the request stream
-                _logger.LogWarning("Unable to disable max request body size.");
-            }
-        }
+        return transformer.TransformResponseTrailersAsync(context, source, cancellationToken);
     }
 
     private void ReportProxyError(HttpContext context, ForwarderError error, Exception ex)
@@ -754,9 +962,29 @@ internal sealed class HttpForwarder : IHttpForwarder
             "Proxying to {targetUrl} {version} {versionPolicy} {isStreaming}");
 
         private static readonly Action<ILogger, ForwarderError, string, Exception> _proxyError = LoggerMessage.Define<ForwarderError, string>(
-            LogLevel.Information,
+            LogLevel.Warning,
             EventIds.ForwardingError,
             "{error}: {message}");
+
+        private static readonly Action<ILogger, int, Exception?> _notProxying = LoggerMessage.Define<int>(
+            LogLevel.Information,
+            EventIds.NotForwarding,
+            "Not Proxying, a {statusCode} response was set by the transforms.");
+
+        private static readonly Action<ILogger, Exception?> _retryingWebSocketDowngradeNoConnect = LoggerMessage.Define(
+            LogLevel.Information,
+            EventIds.RetryingWebSocketDowngradeNoConnect,
+            "Unable to proxy the WebSocket using HTTP/2, the server does not support RFC 8441, retrying with HTTP/1.1.");
+
+        private static readonly Action<ILogger, Exception?> _retryingWebSocketDowngradeNoHttp2 = LoggerMessage.Define(
+            LogLevel.Information,
+            EventIds.RetryingWebSocketDowngradeNoHttp2,
+            "Unable to proxy the WebSocket using HTTP/2, server does not support HTTP/2. Retrying with HTTP/1.1. Disable HTTP/2 negotiation for improved performance.");
+
+        private static readonly Action<ILogger, string?, Exception?> _invalidKeyHeader = LoggerMessage.Define<string?>(
+            LogLevel.Warning,
+            EventIds.InvalidSecWebSocketKeyHeader,
+            "Invalid Sec-WebSocket-Key header: '{key}'.");
 
         public static void ResponseReceived(ILogger logger, HttpResponseMessage msg)
         {
@@ -768,16 +996,36 @@ internal sealed class HttpForwarder : IHttpForwarder
             // Avoid computing the AbsoluteUri unless logging is enabled
             if (logger.IsEnabled(LogLevel.Information))
             {
-                var streaming = isStreamingRequest ? "streaming" : "no-streaming";
+                var streaming = isStreamingRequest ? "streaming" : string.Empty;
                 var version = HttpProtocol.GetHttpProtocol(msg.Version);
                 var versionPolicy = ProtocolHelper.GetVersionPolicy(msg.VersionPolicy);
                 _proxying(logger, msg.RequestUri!.AbsoluteUri, version, versionPolicy, streaming, null);
             }
         }
 
+        public static void NotProxying(ILogger logger, int statusCode)
+        {
+            _notProxying(logger, statusCode, null);
+        }
+
+        public static void InvalidSecWebSocketKeyHeader(ILogger logger, string? key)
+        {
+            _invalidKeyHeader(logger, key, null);
+        }
+
         public static void ErrorProxying(ILogger logger, ForwarderError error, Exception ex)
         {
             _proxyError(logger, error, GetMessage(error), ex);
+        }
+
+        public static void RetryingWebSocketDowngradeNoConnect(ILogger logger)
+        {
+            _retryingWebSocketDowngradeNoConnect(logger, null);
+        }
+
+        public static void RetryingWebSocketDowngradeNoHttp2(ILogger logger)
+        {
+            _retryingWebSocketDowngradeNoHttp2(logger, null);
         }
 
         private static string GetMessage(ForwarderError error)
@@ -786,6 +1034,7 @@ internal sealed class HttpForwarder : IHttpForwarder
             {
                 ForwarderError.None => throw new NotSupportedException("A more specific error must be used"),
                 ForwarderError.Request => "An error was encountered before receiving a response.",
+                ForwarderError.RequestCreation => "An error was encountered while creating the request message.",
                 ForwarderError.RequestTimedOut => "The request timed out before receiving a response.",
                 ForwarderError.RequestCanceled => "The request was canceled before receiving a response.",
                 ForwarderError.RequestBodyCanceled => "Copying the request body was canceled.",
@@ -801,6 +1050,7 @@ internal sealed class HttpForwarder : IHttpForwarder
                 ForwarderError.UpgradeResponseCanceled => "Copying the upgraded response body was canceled.",
                 ForwarderError.UpgradeResponseClient => "The client reported an error when copying the upgraded response body.",
                 ForwarderError.UpgradeResponseDestination => "The destination reported an error when copying the upgraded response body.",
+                ForwarderError.UpgradeActivityTimeout => "The WebSocket connection was closed after being idle longer than the Activity Timeout.",
                 ForwarderError.NoAvailableDestinations => throw new NotImplementedException(), // Not used in this class
                 _ => throw new NotImplementedException(error.ToString()),
             };

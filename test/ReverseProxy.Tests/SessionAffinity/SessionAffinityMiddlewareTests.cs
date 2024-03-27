@@ -13,6 +13,7 @@ using Xunit;
 using Yarp.ReverseProxy.Configuration;
 using Yarp.ReverseProxy.Model;
 using Yarp.ReverseProxy.Forwarder;
+using System.Threading;
 
 namespace Yarp.ReverseProxy.SessionAffinity.Tests;
 
@@ -57,7 +58,7 @@ public class SessionAffinityMiddlewareTests
                 nextInvoked = true;
                 return Task.CompletedTask;
             },
-            policies.Select(p => p.Object), new IAffinityFailurePolicy[0],
+            policies.Select(p => p.Object), Array.Empty<IAffinityFailurePolicy>(),
             new Mock<ILogger<SessionAffinityMiddleware>>().Object);
         var context = new DefaultHttpContext();
         context.SetEndpoint(endpoint);
@@ -74,7 +75,7 @@ public class SessionAffinityMiddlewareTests
 
         if (foundDestinationId is not null)
         {
-            Assert.Equal(1, destinationFeature.AvailableDestinations.Count);
+            Assert.Single(destinationFeature.AvailableDestinations);
             Assert.Equal(foundDestinationId, destinationFeature.AvailableDestinations[0].DestinationId);
         }
         else
@@ -153,21 +154,24 @@ public class SessionAffinityMiddlewareTests
             policy.SetupGet(p => p.Name).Returns(mode);
             if (lookupMiddlewareTest)
             {
-                policy.Setup(p => p.FindAffinitizedDestinations(
+                policy.Setup(p => p.FindAffinitizedDestinationsAsync(
                     It.IsAny<HttpContext>(),
                     It.IsAny<ClusterState>(),
                     ClusterConfig.Config.SessionAffinity,
-                    expectedDestinations))
-                .Returns(new AffinityResult(destinations, status.Value))
+                    expectedDestinations,
+                    It.IsAny<CancellationToken>()))
+                .Returns(new ValueTask<AffinityResult>(new AffinityResult(destinations, status.Value)))
                 .Callback(() => callback(policy.Object));
             }
             else
             {
-                policy.Setup(p => p.AffinitizeResponse(
+                policy.Setup(p => p.AffinitizeResponseAsync(
                     It.IsAny<HttpContext>(),
                     It.IsAny<ClusterState>(),
                     ClusterConfig.Config.SessionAffinity,
-                    expectedDestinations[0]))
+                    expectedDestinations[0],
+                    It.IsAny<CancellationToken>()))
+                .Returns(new ValueTask())
                 .Callback(() => callback(policy.Object));
             }
             result.Add(policy);

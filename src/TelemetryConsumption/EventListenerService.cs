@@ -98,7 +98,7 @@ internal abstract class EventListenerService<TService, TTelemetryConsumer, TMetr
             return;
         }
 
-        var eventLevel = enableEvents ? EventLevel.Verbose : EventLevel.Critical;
+        var eventLevel = enableEvents ? EventLevel.Informational : EventLevel.Critical;
         var arguments = enableMetrics ? new Dictionary<string, string?> { { "EventCounterIntervalSec", MetricsOptions.Interval.TotalSeconds.ToString() } } : null;
 
         EnableEvents(eventSource, eventLevel, EventKeywords.None, arguments);
@@ -120,6 +120,14 @@ internal abstract class EventListenerService<TService, TTelemetryConsumer, TMetr
     {
         if (eventData.EventId == -1)
         {
+            if (!ReferenceEquals(eventData.EventSource, _eventSource))
+            {
+                // Workaround for https://github.com/dotnet/runtime/issues/31927
+                // EventCounters are published to all EventListeners, regardless of
+                // which EventSource providers a listener is enabled for.
+                return;
+            }
+
             // Throwing an exception here would crash the process
             if (eventData.EventName != "EventCounters" ||
                 eventData.Payload?.Count != 1 ||

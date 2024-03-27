@@ -7,39 +7,33 @@ A/B testing and rolling upgrades require procedures for dynamically assigning in
 ## Example
 
 ```
-    public void Configure(IApplicationBuilder app, IProxyStateLookup lookup)
+app.MapReverseProxy(proxyPipeline =>
+{
+    // Custom cluster selection
+    proxyPipeline.Use((context, next) =>
     {
-        app.UseRouting();
-        app.UseEndpoints(endpoints =>
+        var lookup = context.RequestServices.GetRequiredService<IProxyStateLookup>();
+        if (lookup.TryGetCluster(ChooseCluster(context), out var cluster))
         {
-            endpoints.MapReverseProxy(proxyPipeline =>
-            {
-                // Custom cluster selection
-                proxyPipeline.Use((context, next) =>
-                {
-                    if (lookup.TryGetCluster(ChooseCluster(context), out var cluster))
-                    {
-                        context.ReassignProxyRequest(cluster);
-                    }
+            context.ReassignProxyRequest(cluster);
+        }
 
-                    return next();
-                });
-                proxyPipeline.UseSessionAffinity();
-                proxyPipeline.UseLoadBalancing();
-            });
-        });
-    }
+        return next();
+    });
+    proxyPipeline.UseSessionAffinity();
+    proxyPipeline.UseLoadBalancing();
+});
 
-    private string ChooseCluster(HttpContext context)
-    {
-        // Decide which cluster to use. This could be random, weighted, based on headers, etc.
-        return Random.Shared.Next(2) == 1 ? "cluster1" : "cluster2";
-    }
+string ChooseCluster(HttpContext context)
+{
+    // Decide which cluster to use. This could be random, weighted, based on headers, etc.
+    return Random.Shared.Next(2) == 1 ? "cluster1" : "cluster2";
+}
 ```
 
 ## Usage
 
-This scenario makes use of two APIs, [IProxyStateLookup](xref:Yarp.ReverseProxy.IProxyStateLookup) and [ReassignProxyRequest](xref:Microsoft.AspNetCore.Http.HttpContextFeaturesExtensions.ReassignProxyRequest), called from a custom proxy middleware as shown in the sample above.
+This scenario makes use of two APIs, [IProxyStateLookup](xref:Yarp.ReverseProxy.IProxyStateLookup) and [ReassignProxyRequest](xref:Microsoft.AspNetCore.Http.HttpContextFeaturesExtensions.ReassignProxyRequest(Microsoft.AspNetCore.Http.HttpContext,Yarp.ReverseProxy.Model.ClusterState)), called from a custom proxy middleware as shown in the sample above.
 
 `IProxyStateLookup` is a service available in the Dependency Injection container that can be used to look up or enumerate the current routes and clusters. Note this data may change if the configuration changes. An A/B orchestration algorithm can examine the request, decide which cluster to send it to, and then retrieve that cluster from `IProxyStateLookup.TryGetCluster`.
 

@@ -12,6 +12,7 @@ using Xunit;
 using Yarp.ReverseProxy.Common;
 using Yarp.ReverseProxy.Configuration;
 using Yarp.ReverseProxy.Forwarder;
+using Yarp.ReverseProxy.Health;
 
 namespace Yarp.ReverseProxy;
 
@@ -57,15 +58,15 @@ public class PassiveHealthCheckTests
             {
                 destinationReached = true;
                 throw new InvalidOperationException();
-            },
-            proxyBuilder => proxyBuilder.Services.AddSingleton<IForwarderHttpClientFactory>(new MockHttpClientFactory((_, _) => throw new IOException())),
-            proxyApp => { },
-            configTransformer: (c, r) =>
+            })
+        {
+            ConfigTransformer = (c, r) =>
             {
                 c = c with
                 {
                     HealthCheck = new HealthCheckConfig
                     {
+                        AvailableDestinationsPolicy = HealthCheckConstants.AvailableDestinations.HealthyAndUnknown,
                         Passive = new PassiveHealthCheckConfig
                         {
                             Enabled = true
@@ -74,7 +75,9 @@ public class PassiveHealthCheckTests
                 };
 
                 return (c, r);
-            });
+            },
+            ConfigureProxy = proxyBuilder => proxyBuilder.Services.AddSingleton<IForwarderHttpClientFactory>(new MockHttpClientFactory((_, _) => throw new IOException())),
+        };
 
         await test.Invoke(async uri =>
         {
@@ -84,6 +87,7 @@ public class PassiveHealthCheckTests
                 using var response = await client.SendAsync(new HttpRequestMessage(HttpMethod.Get, uri));
 
                 Assert.Equal(i < 10 ? HttpStatusCode.BadGateway : HttpStatusCode.ServiceUnavailable, response.StatusCode);
+                await Task.Yield();
             }
         });
 
@@ -122,10 +126,9 @@ public class PassiveHealthCheckTests
             {
                 destinationReached = true;
                 throw new InvalidOperationException();
-            },
-            proxyBuilder => proxyBuilder.Services.AddSingleton<IForwarderHttpClientFactory>(new MockHttpClientFactory(proxySendAsync)),
-            proxyApp => { },
-            configTransformer: (c, r) =>
+            })
+        {
+            ConfigTransformer = (c, r) =>
             {
                 c = c with
                 {
@@ -139,7 +142,9 @@ public class PassiveHealthCheckTests
                 };
 
                 return (c, r);
-            });
+            },
+            ConfigureProxy = proxyBuilder => proxyBuilder.Services.AddSingleton<IForwarderHttpClientFactory>(new MockHttpClientFactory(proxySendAsync)),
+        };
 
         await test.Invoke(async uri =>
         {

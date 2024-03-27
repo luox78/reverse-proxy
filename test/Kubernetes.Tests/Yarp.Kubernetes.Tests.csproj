@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFrameworks>net6.0</TargetFrameworks>
+    <TargetFrameworks>net6.0;net7.0;net8.0;net9.0</TargetFrameworks>
     <OutputType>Library</OutputType>
     <NoWarn>$(NoWarn);CS8002</NoWarn>
     <RootNamespace>Yarp.Kubernetes</RootNamespace>
@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Kubernetes.Controller\Yarp.Kubernetes.Controller.csproj" />
+    <ProjectReference Include="..\Tests.Common\Yarp.Tests.Common.csproj" />
   </ItemGroup>
 
   <ItemGroup>
@@ -17,10 +18,18 @@
 
   <ItemGroup>
     <None Remove="Client\*.yaml" />
+    <None Remove="Certificates\cert.der" />
+    <None Remove="Certificates\cert.pem" />
+    <None Remove="Certificates\key.der" />
+    <None Remove="Certificates\key.pem" />
   </ItemGroup>
 
   <ItemGroup>
     <EmbeddedResource Include="Client\*.yaml" />
+    <EmbeddedResource Include="Certificates\cert.der" />
+    <EmbeddedResource Include="Certificates\cert.pem" />
+    <EmbeddedResource Include="Certificates\key.der" />
+    <EmbeddedResource Include="Certificates\key.pem" />
   </ItemGroup>
 
   <ItemGroup>

@@ -4,6 +4,7 @@
 using System;
 using System.Net;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -46,13 +47,14 @@ public abstract class HttpProxyCookieTests
                     tcs.SetException(new Exception("Missing 'Cookie' header in request"));
                 }
                 return Task.CompletedTask;
-            },
-            proxyBuilder => { },
-            proxyApp =>
+            })
+        {
+            ProxyProtocol = HttpProtocol,
+            ConfigureProxyApp = proxyApp =>
             {
                 proxyApp.UseMiddleware<CheckCookieHeaderMiddleware>();
             },
-            proxyProtocol: HttpProtocol);
+        };
 
         await test.Invoke(async uri =>
         {
@@ -86,13 +88,19 @@ public abstract class HttpProxyCookieTests
             }
             else if (context.Request.Protocol == "HTTP/2")
             {
+#if NET7_0_OR_GREATER
+                // Fixed in kestrel in 7.0
+                Assert.Single(headerValues);
+                Assert.Equal(Cookies, headerValues);
+#else
                 Assert.Equal(2, headerValues.Count);
                 Assert.Equal(CookieA, headerValues[0]);
                 Assert.Equal(CookieB, headerValues[1]);
+#endif
             }
             else
             {
-                Assert.True(false, $"Unexpected HTTP protocol '{context.Request.Protocol}'");
+                Assert.Fail($"Unexpected HTTP protocol '{context.Request.Protocol}'");
             }
 
             await _next.Invoke(context);

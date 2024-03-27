@@ -44,9 +44,9 @@ public class ResponseTrailerRemoveTransformTests
         var trailerFeature = new TestTrailersFeature();
         httpContext.Features.Set<IHttpResponseTrailersFeature>(trailerFeature);
         var proxyResponse = new HttpResponseMessage();
-        foreach (var pair in TestResources.ParseNameAndValues(names, values))
+        foreach (var (name, subvalues) in TestResources.ParseNameAndValues(names, values))
         {
-            trailerFeature.Trailers.Add(pair.Name, pair.Values);
+            trailerFeature.Trailers[name] = subvalues;
         }
 
         var transform = new ResponseTrailerRemoveTransform(removedHeader, condition);
@@ -59,10 +59,5 @@ public class ResponseTrailerRemoveTransformTests
 
         var expectedHeaders = expected.Split("; ", StringSplitOptions.RemoveEmptyEntries);
         Assert.Equal(expectedHeaders, trailerFeature.Trailers.Select(h => h.Key));
-    }
-
-    private class TestTrailersFeature : IHttpResponseTrailersFeature
-    {
-        public IHeaderDictionary Trailers { get; set; } = new HeaderDictionary();
     }
 }
